@@ -29,20 +29,37 @@ greenroom indexes recordings of The Performance Academy programs into 5-second w
 
 ## Uncertainty handling
 
-To be written from PLAN.md Section 6 once the calibration fit exists: how scores become Subjective Logic opinions, how modalities are fused, what triggers "staff review required", and the fitted thresholds with the size of the split they were fitted on.
+- Every channel's score for a label becomes a binomial Subjective Logic opinion: positive evidence r = E_pos * q * p and negative evidence s = E_neg * q * (1 - p), with belief r / (r + s + 2), disbelief s / (r + s + 2), uncertainty 2 / (r + s + 2). q is an input-quality factor (audio signal above the noise floor, frame brightness, word count); a channel that saw nothing contributes a vacuous opinion.
+- Positive and negative weights differ per channel (profiles/*.yaml): 10 and 4 for the zero-shot channels, 10 and 1.5 for the supervised classifiers whose label sets barely overlap ours, 5 and 2 for the transcript model. These values are placeholders chosen on the clip-level sanity checks below, not fitted; they are reported here for that reason.
+- Softmax channels are normalized against their own leader and against chance (score mode relative_top) so a runner-up at a third of the leader lands below the presence floor.
+- Opinions are fused per label with cumulative fusion; a pairwise belief conflict mass is computed alongside. A window is routed to "staff review required" when the primary's uncertainty is 0.5 or more, when conflict is 0.4 or more, or when no label reaches a projected probability of 0.5; it is marked mixed when a second activity also clears 0.5 within a 0.1 margin.
+- The vision channels give singing and rap equal support (a camera cannot separate them) and the transcript channel does the same (words cannot either); only the audio channels decide between the two.
 
-## Evaluation summary
+## Evaluation summary (run at commit c01741b, rtx4090 profile, all five channels)
 
-To be filled from the Phase 4 results: gold set size and inter-annotator agreement, per-label precision/recall/F1 with cluster-bootstrap confidence intervals, confusion matrix, calibration (ECE, Brier), risk-coverage results, ablations, throughput and energy per hour of video per profile. Numbers only from the evaluation scripts; nothing typed by hand.
+No hand-labeled ground truth exists for this footage, so the numbers are of four kinds, each stated for what it is. All come from `greenroom report`.
 
-## Known limitations (to be completed)
+- Corpus: 9 provided files, 26.8 minutes, 323 windows of 5 s.
+- File-name weak labels (the organizers' own names for the single-activity clips): the dominant primary label agrees with the file name on 5 of 6 clips (both songwriting clips, the dance, rap and singing promos; 31 of 31, 45 of 46, 5 of 7, 3 of 4 and 2 of 2 windows carry an expected label). The painting promo disagrees: a song with lyrics plays over painting footage, two audio-side channels hear a performance, and visual arts is primary on 2 of 9 windows. This is the system's clearest known failure mode (Section Known limitations).
+- Triage: 56% of windows confident, 28% mixed, 16% review required overall; on the 15-minute final video 48%, 31%, 21%.
+- Staff review: 4 decisions by the pipeline author (all accepted), median 28 s per decision. Too few to report an agreement rate; the mechanism and the ledger are what is demonstrated.
+- Inter-channel diagnostics: each channel's own top label matches the fused primary on 57% (audio), 49% (X-CLIP), 33% (AST), 27% (transcript, over 211 windows with speech) and 25% (VideoMAE) of windows; the fused primary is supported by all five channels on 118 windows, by one channel only on 29. Mean uncertainty of the primary 0.11, mean conflict 0.28, conflict at or above 0.4 on 16% of windows.
+- Throughput and energy on the RTX 4090 laptop, sustained run with all channels: 2.6 video-minutes per wall-minute, 118 kJ of GPU energy per hour of video (NVML, Ollama included). Single short clips run at 4 to 5 video-minutes per wall-minute; the sustained number is lower because the laptop GPU throttles thermally during a long run. The t4 profile has not yet been measured on a T4.
 
-- All models are zero-shot and were trained on web data; youth arts footage shot in rooms with mixed lighting is out of distribution for them.
+## Known limitations
+
+- Zero-shot and web-trained models; youth arts footage in rooms with mixed lighting is out of distribution for all of them.
+- A song with lyrics over montage footage is heard as a performance by CLAP, AST and the transcript model; only the vision channels can say the picture shows painting or sewing. Staff review catches it; the system cannot, and the painting promo shows it.
+- Acting/theater is supported mostly by X-CLIP alone (no audio class corresponds to it), so talking heads can read as monologue; the transcript channel reduces this (acting fell from 4.9 to 3.6 minutes when it was added) but does not remove it.
+- Singing and rap flip between adjacent windows inside vocal segments because only the audio channels can tell them apart and they are not always sure; segment-level smoothing is not implemented.
+- Facilitation comes from words only; silent instruction (pointing, demonstrating) is missed.
 - Edited promotional clips contain fast cuts and music beds; a 5-second window can span several shots.
-- Facilitation is detected from words only; silent instruction (pointing, demonstrating) is missed.
-- Expression suggestions come from transcript text alone and are weak by design.
+- Evidence weights and thresholds are unfitted placeholders; the review ledger is the data they should be fitted on.
+- Expression suggestions: see Section 3 of docs/DATA_GOVERNANCE.md for the face-expression stage and its limits; the transcript-based suggestions are weak by design.
 
-## Privacy and bias risks (to be completed)
+## Privacy and bias risks
 
-- Zero-shot vision and audio models may perform unevenly across skin tones, body types, accents and dialects; this is reported where the gold set allows and otherwise named as untested.
-- Transcripts of participants' own words are sensitive narrative content; they stay on the processing machine and are never exported in samples.
+- Zero-shot vision and audio models perform unevenly across skin tones, body types, accents and dialects; nothing here measures that, so it is named as untested rather than absent.
+- Face expression classifiers are trained on posed, mostly adult faces and are known to perform unevenly across skin tones, ages and lighting; an expression is not an emotion and performers act. Their output is a suggestion behind a toggle, never a claim.
+- Transcripts of participants' own words are sensitive narrative content; they stay on the processing machine and are never exported in samples or shown to any external model.
+- No identity is computed anywhere; records are about windows of time, not people.
