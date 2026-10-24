@@ -13,6 +13,7 @@ computed: no speaker embeddings, no diarization.
 """
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,15 +146,18 @@ class AudioEventScorer:
             raise RuntimeError(f"Could not load a CLAP checkpoint: {last_error}")
         self.prompts: list[str] = [p for spec in AUDIO_CLASSES.values() for p in spec["prompts"]]
         self.prompt_class: list[str] = [cid for cid, spec in AUDIO_CLASSES.items() for _ in spec["prompts"]]
+        # transformers renamed the processor keyword from `audios` to `audio`; pick whichever this version has.
+        try:
+            params = inspect.signature(self.processor.__call__).parameters
+        except (TypeError, ValueError):
+            params = {}
+        self._audio_kw = "audios" if ("audios" in params and "audio" not in params) else "audio"
 
     def _batch_probs(self, segments: list[np.ndarray]) -> np.ndarray:
         import torch
 
         kwargs = dict(text=self.prompts, return_tensors="pt", padding=True, sampling_rate=CLAP_SAMPLE_RATE)
-        try:
-            inputs = self.processor(audios=segments, **kwargs)
-        except TypeError:
-            inputs = self.processor(audio=segments, **kwargs)
+        inputs = self.processor(**{self._audio_kw: segments}, **kwargs)
         inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
         with torch.inference_mode():
             out = self.model(**inputs)

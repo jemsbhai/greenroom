@@ -4,6 +4,8 @@
     python -m greenroom windows [--subclips] build the window index (and review subclips)
     python -m greenroom gold-app            print the command that starts the gold labeling app
     python -m greenroom run ...             run the pipeline on one or more videos
+    python -m greenroom review-app          print the command that starts the staff review app
+    python -m greenroom verify              check the hash chain of every review ledger
 """
 from __future__ import annotations
 
@@ -126,6 +128,30 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_app(_: argparse.Namespace) -> int:
+    app = config.repo_root() / "app" / "review_app.py"
+    print(f"{sys.executable} -m streamlit run \"{app}\" --server.address 127.0.0.1")
+    return 0
+
+
+def cmd_verify(_: argparse.Namespace) -> int:
+    from .ledger import verify_all
+
+    reports = verify_all()
+    if not reports:
+        print("no review ledgers found")
+        return 0
+    bad = 0
+    for r in reports:
+        state = "ok" if r["ok"] else "BROKEN"
+        print(f"{r['video_id']:<45} {r['entries']:4d} decisions  {state}")
+        for p in r["problems"]:
+            print(f"    {p}")
+        bad += 0 if r["ok"] else 1
+    print(f"{len(reports) - bad} of {len(reports)} ledgers intact")
+    return 1 if bad else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="greenroom", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -149,6 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--stages", default=None, help="comma-separated stages; default: all available")
     p_run.add_argument("--fusion", default="cumulative", choices=["cumulative", "mean", "max"])
     p_run.set_defaults(func=cmd_run)
+
+    p_review = sub.add_parser("review-app", help="print the command that starts the staff review app")
+    p_review.set_defaults(func=cmd_review_app)
+
+    p_verify = sub.add_parser("verify", help="check the hash chain of every review ledger")
+    p_verify.set_defaults(func=cmd_verify)
     return parser
 
 

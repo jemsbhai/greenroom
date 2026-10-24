@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+import warnings
 
 
 class StageMeter:
@@ -28,7 +29,9 @@ class StageMeter:
 
     def _init_nvml(self) -> bool:
         try:
-            import pynvml  # provided by pynvml or nvidia-ml-py
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                import pynvml  # provided by pynvml or nvidia-ml-py
 
             pynvml.nvmlInit()
             self._handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)

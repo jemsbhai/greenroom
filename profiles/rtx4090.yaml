@@ -20,11 +20,16 @@ audio_events:
   hop_seconds: 5
 
 vision:
-  model: google/siglip-so400m-patch14-384
-  frames_per_window: 4
-  frame_height: 384
-  sample_fps: 1.0
-  detector: facebook/detr-resnet-50
+  # D18: two sub-channels, each its own opinion. Frame count per window comes from each model's config.
+  xclip_model: microsoft/xclip-base-patch16-zero-shot
+  videomae_model: MCG-NJU/videomae-base-finetuned-kinetics
+  sample_fps: 8.0           # frames sampled per second for the whole video (low resolution, cached, purgeable)
+  frame_height: 256
+  batch_size: 8
+  dark_luminance: 12        # mean 8-bit luminance at or below which a window carries no visual evidence
+  full_quality_luminance: 50
+  siglip_model: null        # ablation option only
+  detector: facebook/detr-resnet-50   # person counting, later phase
   detector_person_threshold: 0.7
 
 transcript_llm:
@@ -42,16 +47,38 @@ vlm:
 
 fusion:
   prior_weight: 2.0
-  # Evidence weights and thresholds below are placeholders; they are fitted on
-  # the calibration split (PLAN.md section 8) and overwritten by fit output.
-  evidence_weight:
-    audio: 10.0
-    vision: 10.0
-    transcript: 5.0
+  base_rate_default: 0.1
+  # Per-channel evidence settings (PLAN.md 6.1). pos and neg are the evidence
+  # weights for positive and negative evidence; a small neg says a low score is
+  # weak evidence against the label. score_mode relative converts a softmax
+  # share into chance-normalized support over `competitors` classes before the
+  # mapping. Placeholders, reported in the system card; refit when labels exist.
+  channels:
+    audio:
+      pos: 10.0
+      neg: 4.0
+      score_mode: relative_top
+      competitors: 7        # CLAP audio classes, including the context classes speech, music, silence
+    xclip:
+      pos: 10.0
+      neg: 4.0
+      score_mode: relative_top
+      competitors: 15       # taxonomy labels competing in the X-CLIP softmax
+    videomae:
+      pos: 10.0
+      neg: 1.5
+      score_mode: raw       # Kinetics-400 mass on mapped classes; absence is weak evidence
+      competitors: 400
+    transcript:
+      pos: 5.0
+      neg: 2.0
+      score_mode: raw
+      competitors: 2
   thresholds:
     secondary_min_projected: 0.35
     review_required_uncertainty: 0.5
-    review_required_conflict: 0.3
+    review_required_conflict: 0.4
+    review_required_min_projected: 0.5
     mixed_activity_margin: 0.1
 
 energy:

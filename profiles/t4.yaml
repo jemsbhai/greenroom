@@ -20,10 +20,14 @@ audio_events:
   hop_seconds: 5
 
 vision:
-  model: google/siglip-base-patch16-224
-  frames_per_window: 2
-  frame_height: 256
-  sample_fps: 0.5
+  xclip_model: microsoft/xclip-base-patch32      # 8 frames per window
+  videomae_model: MCG-NJU/videomae-base-finetuned-kinetics
+  sample_fps: 4.0
+  frame_height: 224
+  batch_size: 4
+  dark_luminance: 12
+  full_quality_luminance: 50
+  siglip_model: null
   detector: facebook/detr-resnet-50
   detector_person_threshold: 0.7
 
@@ -42,14 +46,33 @@ vlm:
 
 fusion:
   prior_weight: 2.0
-  evidence_weight:
-    audio: 10.0
-    vision: 10.0
-    transcript: 5.0
+  base_rate_default: 0.1
+  channels:
+    audio:
+      pos: 10.0
+      neg: 4.0
+      score_mode: relative_top
+      competitors: 7
+    xclip:
+      pos: 10.0
+      neg: 4.0
+      score_mode: relative_top
+      competitors: 15
+    videomae:
+      pos: 10.0
+      neg: 1.5
+      score_mode: raw
+      competitors: 400
+    transcript:
+      pos: 5.0
+      neg: 2.0
+      score_mode: raw
+      competitors: 2
   thresholds:
     secondary_min_projected: 0.35
     review_required_uncertainty: 0.5
-    review_required_conflict: 0.3
+    review_required_conflict: 0.4
+    review_required_min_projected: 0.5
     mixed_activity_margin: 0.1
 
 energy:

@@ -5,7 +5,7 @@ import pytest
 
 from greenroom import taxonomy as T
 from greenroom.fuse import Thresholds, decide, fuse_labels
-from greenroom.opinions import Opinion, conflict, cumulative_fuse, from_score, fuse_all, vacuous
+from greenroom.opinions import Opinion, conflict, cumulative_fuse, from_score, fuse_all, relative_support, vacuous
 
 
 def approx(a, b, tol=1e-9):
@@ -17,6 +17,42 @@ def test_from_score_full_evidence():
     # r = 8, s = 2, W = 2 -> b = 8/12, d = 2/12, u = 2/12
     assert approx(o.belief, 8 / 12) and approx(o.disbelief, 2 / 12) and approx(o.uncertainty, 2 / 12)
     assert approx(o.projected, 8 / 12 + 0.1 * 2 / 12)
+
+
+def test_asymmetric_negative_weight_turns_disbelief_into_uncertainty():
+    symmetric = from_score(p=0.05, evidence_weight=10.0, quality=1.0, base_rate=0.1)
+    asymmetric = from_score(p=0.05, evidence_weight=10.0, quality=1.0, base_rate=0.1, negative_weight=1.5)
+    assert symmetric.disbelief > 0.7
+    assert asymmetric.disbelief < 0.4 and asymmetric.uncertainty > symmetric.uncertainty
+    assert approx(asymmetric.belief, 0.5 / (0.5 + 1.425 + 2.0))
+
+
+def test_relative_support_against_chance():
+    assert approx(relative_support(1 / 7, 7), 0.5)
+    assert approx(relative_support(1 / 15, 15), 0.5)
+    assert relative_support(0.0, 15) == 0.0
+    assert relative_support(1.0, 15) == 1.0
+    assert relative_support(0.2, 15) > 0.7
+    assert relative_support(0.01, 15) < 0.15
+
+
+def test_relative_top_separates_leader_from_runners_up():
+    from greenroom.pipeline import scores_to_opinions
+
+    rates = {lid: 0.1 for lid in T.ALL_LABEL_IDS}
+    setting = {"pos": 10.0, "neg": 4.0, "score_mode": "relative_top", "competitors": 15}
+    scores = {"dance": 0.30, "acting_theater": 0.10, "singing_vocal_performance": 0.05}
+    ops = scores_to_opinions(scores, 1.0, setting, rates, 2.0)
+    assert ops["dance"].projected > 0.7
+    assert ops["acting_theater"].projected < 0.5
+    assert ops["singing_vocal_performance"].projected < ops["acting_theater"].projected
+    assert ops["podcast_production"].is_vacuous
+    # a flat channel (leader at chance) asserts little even for its leader
+    flat = scores_to_opinions({"dance": 1 / 15, "acting_theater": 1 / 15}, 1.0, setting, rates, 2.0)
+    assert flat["dance"].projected < 0.65
+    # audio: a speech-dominated window gives singing little support even if singing leads the mapped labels
+    speechy = scores_to_opinions({"singing_vocal_performance": 0.10}, 1.0, {**setting, "competitors": 7}, rates, 2.0, top_score=0.60)
+    assert speechy["singing_vocal_performance"].projected < 0.4
 
 
 def test_zero_quality_is_vacuous():
@@ -97,6 +133,15 @@ def test_decide_review_required_on_conflict():
     d = decide(fused, conflicts, Thresholds())
     assert d.review_status == "staff_review_required"
     assert any("conflict" in r for r in d.reasons)
+
+
+def test_decide_review_required_when_nothing_is_confident():
+    mods, rates = _single_modality("dance", 0.45)
+    fused, conflicts = fuse_labels(mods, rates)
+    d = decide(fused, conflicts, Thresholds(review_required_min_projected=0.5))
+    assert d.primary == "dance"
+    assert d.review_status == "staff_review_required"
+    assert any("projected" in r for r in d.reasons)
 
 
 def test_activity_secondary_promotes_over_non_activity_primary():

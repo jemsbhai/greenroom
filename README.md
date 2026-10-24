@@ -37,10 +37,14 @@ python -m pytest -q
 # gold labeling app (human labels, no model output on screen)
 python -m streamlit run app/gold_app.py --server.address 127.0.0.1
 
-# pipeline (Phase 1: audio channel), records land under <data>/records/<video_id>/
+# pipeline (audio + two vision channels), records land under <data>/records/<video_id>/
 python -m pip install -e ".[ml]"
 python -m greenroom run --video this-is-me-songwriting-camp2-reese
 python -m greenroom run --all --profile rtx4090
+
+# staff review app (accept, edit, reject, defer; hash-chained ledger) and ledger check
+python -m streamlit run app/review_app.py --server.address 127.0.0.1
+python -m greenroom verify
 ```
 
 The `ml` extra (`python -m pip install -e ".[ml]"`) installs the model dependencies for the pipeline stages; `torch` is expected to be installed already (CUDA build). No virtual environment is used on the development machine; pins are captured with `pip freeze > requirements.lock` once the pipeline runs.
@@ -48,10 +52,10 @@ The `ml` extra (`python -m pip install -e ".[ml]"`) installs the model dependenc
 ## Repository layout
 
 ```
-app/            Streamlit apps: gold labeling (now), staff review (Phase 3)
+app/            Streamlit apps: staff review (review_app.py), blind labeling (gold_app.py)
 docs/           PLAN.md, ANNOTATION_GUIDELINE.md, later SYSTEM_CARD.md, DATA_GOVERNANCE.md, ARCHITECTURE.md
 profiles/       rtx4090.yaml (development), t4.yaml (deployable target)
-samples/        sample output files generated from team-recorded footage only
+samples/        sample output files generated from openly licensed public footage only
 src/greenroom/  the package
 tests/          unit tests that need no media and no models
 ```

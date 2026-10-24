@@ -111,10 +111,13 @@ flowchart LR
 - Self-reported LLM confidence is poorly calibrated; it enters the fusion with a lower evidence weight (Section 6) and the ablation measures what it adds.
 - Served by Ollama. Model: qwen2.5:7b-instruct on the rtx4090 profile, qwen2.5:3b-instruct on the t4 profile. The client refuses any model tag that is cloud-routed (D17). If a Qwen3-class model is used, thinking is disabled so the token budget is not consumed by reasoning traces.
 
-### 4.6 Vision tags (src/greenroom/vision_tags.py)
+### 4.6 Vision channels (src/greenroom/vision_tags.py)
 
-- SigLIP zero-shot (google/siglip-so400m-patch14-384 on the rtx4090 profile; google/siglip-base-patch16-224 on the t4 profile; SigLIP 2 equivalents if the installed transformers supports them) with a prompt ensemble per activity (3 to 5 phrasings each, e.g. "teenagers dancing on a stage", "a person painting at an easel", "a person singing into a microphone", "a fashion runway walk", "people recording a podcast at a table with microphones", "a camera operator filming a scene").
-- Per window: the frames whose centers fall inside the window (4 on the rtx4090 profile, 2 on t4), pooled by mean per label.
+Two vision sub-channels, each producing its own opinions so the gold set can tell us what each adds (D18):
+
+- Zero-shot video-text: X-CLIP (microsoft/xclip-base-patch32 on the t4 profile, microsoft/xclip-base-patch16-zero-shot on the rtx4090 profile) over the 8 frames of the window, scored against a prompt ensemble per activity (3 to 5 phrasings each, e.g. "teenagers dancing on a stage", "a person painting at an easel", "a person singing into a microphone", "a fashion runway walk", "people recording a podcast at a table with microphones", "a camera operator filming a scene"). X-CLIP sees motion, which per-frame image models do not, and it covers every label in the taxonomy through its prompts.
+- Supervised action recognition: VideoMAE fine-tuned on Kinetics-400 (MCG-NJU/videomae-base-finetuned-kinetics) over 16 frames of the window, with a fixed mapping from Kinetics classes to taxonomy labels (the dance classes to dance; singing to singing; applauding to audience; drawing, painting and writing to visual arts; instrument classes to recording arts). Only the mapped labels receive evidence; the rest stay vacuous. This is the "pretrained activity model" the team repo pointed at, used correctly: real sampled frames, probabilities over its own classes, no claims about labels it was not trained for.
+- SigLIP per-frame tagging (google/siglip-so400m-patch14-384) is kept as an optional third sub-channel for the ablation only.
 - Person count per frame from a detector on HF (facebook/detr-resnet-50), used for two things only: skipping empty-room windows and reporting participation volume at session level. Boxes are counted and discarded; nothing is cropped or stored.
 
 ### 4.7 Observable indicators (src/greenroom/indicators.py)
@@ -243,12 +246,16 @@ Stages run one after another and release the GPU between them, because a laptop 
 
 ## 8. Evaluation plan (the 40%)
 
-### 8.1 Gold set
+### 8.1 Ground truth without a labeling team (D8 revised)
 
-- Unit: the 5-second window (D12). Metrics are computed on the system's own units and gold labels share them exactly.
-- TPA footage: a census. Two annotators label every window of all 8 files independently in gold mode (no model output visible) using guideline v1.0; disagreements are adjudicated jointly by the two annotators; the pipeline author takes no part in labeling or adjudication. Inter-annotator agreement is reported (Cohen's kappa on the primary label, per-label kappa for secondary labels and the facilitation flag).
-- Calibration split: a fixed, seeded 20% of TPA windows stratified by video, used for evidence weights, base rates and thresholds. The remaining 80% is the test split. The split is written to the data directory before any threshold is chosen.
-- Public footage (D13): 45 to 90 minutes of openly licensed recordings of adult performing-arts events (recitals, open mics, poetry slams, rehearsals, workshops), sourced and license-checked by the teammates, kept under data\public\videos with attribution in docs/PUBLIC_FOOTAGE.md. Two annotators label a seeded stratified sample of 200 windows (strata: the pipeline's preliminary primary label and the person-count bucket, so dead time and transitions are represented) plus every window the pipeline marks review-required. Reported separately from the TPA numbers, never pooled.
+- Unit: the 5-second window (D12). Metrics are computed on the system's own units and any labels share them exactly.
+- No teammate labels windows; labeling is part of the product, done by staff in the review app. Validation therefore comes from four sources, each reported for what it is:
+  1. Video-level weak labels from the organizers' own file names. The five promos (painting, dance, rap, singing, boots) and the two songwriting clips name their dominant activity. The test: does the system's dominant primary label per video agree with the file name, and what fraction of that video's windows carry it. Seven videos, zero labeling effort, coarse by construction and described as such.
+  2. Staff review decisions. Every accept, edit, reject and defer in the review app is logged, so acceptance rate per label, edit rate, and agreement between the system's label and the reviewer's final label are computed over whatever has been reviewed. A 30-minute session by any team member acting as staff yields the first numbers; the demo adds more. This is also how TPA would measure the system once deployed.
+  3. Inter-channel diagnostics: how often audio, X-CLIP and VideoMAE agree on the primary label, the conflict-flag rate, the distribution of fused uncertainty, the share of windows routed to review. Diagnostics, not accuracy, and the slide says so.
+  4. Blind labels, if any team member labels windows in gold mode (model output hidden): the full metric suite of 8.2 runs on them, with who labeled and how many disclosed in the system card.
+- Thresholds and evidence weights stay at the profile defaults unless source 4 reaches 60 windows or more; then a seeded 30% of it is the calibration split and the rest is test. Nothing is tuned on data later reported as test.
+- Public footage (D13): 45 to 90 minutes of openly licensed recordings of adult performing-arts events (recitals, open mics, poetry slams, rehearsals, workshops), sourced and license-checked by the teammates, kept under data\public\videos with attribution in docs/PUBLIC_FOOTAGE.md. Used for long-form behavior (throughput, review-queue rates, dead-time handling) and the public demo; no accuracy claim is made on it unless blind labels exist for it. Reported separately from the TPA numbers, never pooled.
 - Because adjacent windows of one clip are correlated, every confidence interval is a cluster bootstrap by video (1000 resamples), not an i.i.d. bootstrap over windows.
 
 ### 8.2 Metrics
@@ -282,11 +289,14 @@ Stages run one after another and release the GPU between them, because a laptop 
 Muntaser (pipeline owner)
 - Sections 4.1 to 4.9, 4.11, 4.12, 6, 7, 8.2 metrics code, architecture diagram, system card technical sections, the Model Performance slides.
 
-Teammate A (annotation lead)
-- Owns guideline v1.0 wording (with Muntaser's taxonomy), labels every TPA window in the gold app, adjudicates with Teammate B, runs the IAA script, drafts the data-governance note from the outline in Section 9, builds the Motivation and Implications slides.
+Teammate 1, kushulreddy39 (public footage, prompt images, governance)
+- Sources and license-checks the public footage with Teammate 2 (D13), collects the public image set for prompt tuning, drafts the data-governance note from the outline in Section 9, builds the Motivation and Implications slides.
 
-Teammate B (review and demo lead)
-- Second gold annotator; runs the staff-time pilot (8.3); writes the demo script and records the public demo on the public footage; writes the README quickstart by following it on a clean machine; owns the DevPost page text and the slide deck assembly in the organizers' template.
+Teammate 2, AP10-24 (model cards, demo, DevPost)
+- Sources and license-checks the public footage with Teammate 1; fills the model table in docs/SYSTEM_CARD.md from the Hugging Face model cards; writes the demo script and records the public demo on the public footage; writes the README quickstart by following it on a clean machine; owns the DevPost page text and the slide deck assembly in the organizers' template.
+
+Either teammate, 30 minutes, once the review app exists
+- A review session as "staff": accept, edit, reject or defer suggestions on the provided videos on Muntaser's laptop. This produces the staff-time numbers (8.3) and the first review-based agreement numbers (8.1, source 2); it is using the product, not labeling.
 
 Shared, and early (D13)
 - The two teammates source 45 to 90 minutes of openly licensed public footage of adult performing-arts events (Internet Archive, Wikimedia Commons; no YouTube downloads), verify the license of every file, and write the attribution table in docs/PUBLIC_FOOTAGE.md. This footage is the only material that appears in any persisted public artifact, it is the long-form test input, and it is the default demo input.
@@ -322,7 +332,7 @@ Order of operations, not a schedule. Each phase ends with something that runs en
 - D5 (default, in effect): SigLIP so400m-384 on rtx4090, base-224 on t4; DETR for person counts.
 - D6 (resolved): transcript LLM served by Ollama; qwen2.5:7b-instruct must be pulled, since only cloud-routed models are present on the machine.
 - D7 (recommended, pending): expression suggestions are transcript-derived only, shown behind a toggle, status ai_suggested_unverified; no face-based affect anywhere.
-- D8 (recommended, pending): gold set protocol as in 8.1, pipeline author excluded from gold labeling and adjudication.
+- D8 (revised): no teammate labeling; labeling is part of the product (staff review). Validation comes from file-name weak labels, logged review decisions, inter-channel diagnostics and any disclosed blind labels, as in 8.1. The gold app stays in the repo as the blind-labeling tool for anyone who has time.
 - D9 (recommended, pending): all persisted public artifacts (repo, samples, slides, DevPost, demo recording) use openly licensed public footage only; repo private during the event with organizers added.
 - D10 (default, in effect): ablation baselines as in 6.4; results reported whether or not SL fusion wins.
 - D11 (resolved): the Hugging Face credit (about $10 per the organizers' email) is spent on one thing: a private T4-class run of the t4 profile over the openly licensed public footage, so the deployability claim is measured rather than projected. No provided footage or derived data is uploaded anywhere; all processing of the provided data happens on the laptop. Third-party cloud models (Ollama ':cloud' tags, commercial APIs) are outside the brief's exception and are never used.
@@ -332,6 +342,7 @@ Order of operations, not a schedule. Each phase ends with something that runs en
 - D15 (default, in effect): Streamlit for the gold and review apps.
 - D16 (resolved): no virtual environment on the development machine; the package and its dependencies are installed into the system Python 3.12 next to the existing torch 2.6.0+cu124, and pins are captured with `pip freeze > requirements.lock` once the first full run succeeds.
 - D17 (default, in effect): the LLM client refuses cloud-routed Ollama models (":cloud" tags); `python -m greenroom env` reports which models on the machine are local.
+- D18 (default, in effect): the vision evidence comes from two sub-channels, X-CLIP zero-shot (motion-aware, covers every label through prompts) and VideoMAE Kinetics-400 supervised (mapped classes only), each as its own opinion; SigLIP per-frame is an ablation option, not a default. The team repo's models are not reused: its CLIP baseline is the weaker per-frame version of the same idea, its X-CLIP use fed repeated still frames and never ran end to end, and its FaceNet and expression code is outside the rules.
 
 ## Appendix A: folder layout on the laptop
 

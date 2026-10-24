@@ -86,11 +86,35 @@ def from_score(
     quality: float,
     base_rate: float,
     prior_weight: float = PRIOR_WEIGHT,
+    negative_weight: float | None = None,
 ) -> Opinion:
-    """Turn a model score p in [0, 1] into an opinion with evidence E * q."""
+    """Turn a model score p in [0, 1] into an opinion.
+
+    Positive evidence r = E_pos * q * p and negative evidence s = E_neg * q * (1 - p).
+    E_neg defaults to E_pos. A smaller E_neg says that a low score is weak
+    evidence against the label, which is the right stance for a classifier
+    whose label set barely overlaps ours (a Kinetics model scoring 'songwriting').
+    """
     p = _clamp(float(p))
-    e = max(0.0, float(evidence_weight)) * _clamp(float(quality))
-    return from_evidence(e * p, e * (1.0 - p), base_rate, prior_weight)
+    q = _clamp(float(quality))
+    e_pos = max(0.0, float(evidence_weight)) * q
+    e_neg = (e_pos if negative_weight is None else max(0.0, float(negative_weight)) * q)
+    return from_evidence(e_pos * p, e_neg * (1.0 - p), base_rate, prior_weight)
+
+
+def relative_support(p: float, competitors: int) -> float:
+    """Chance-normalized support for one class of a softmax over `competitors` classes.
+
+    Returns the probability that the class beats a uniform competitor:
+    p (K - 1) / (p (K - 1) + 1 - p). Equals 0.5 at chance (p = 1/K), 0 at p = 0,
+    1 at p = 1. Used before from_score for channels whose scores are shares of a
+    softmax, where a small share can still be strong relative evidence.
+    """
+    p = _clamp(float(p))
+    k = max(2, int(competitors))
+    num = p * (k - 1)
+    den = num + (1.0 - p)
+    return _clamp(num / den) if den > 0 else 0.0
 
 
 def cumulative_fuse(x: Opinion, y: Opinion) -> Opinion:

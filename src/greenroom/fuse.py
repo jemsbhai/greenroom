@@ -19,7 +19,8 @@ FUSION_METHODS = ("cumulative", "mean", "max")
 class Thresholds:
     secondary_min_projected: float = 0.35
     review_required_uncertainty: float = 0.5
-    review_required_conflict: float = 0.3
+    review_required_conflict: float = 0.4
+    review_required_min_projected: float = 0.5
     mixed_activity_margin: float = 0.1
 
     @classmethod
@@ -66,7 +67,8 @@ def decide(fused: dict[str, Opinion], conflicts: dict[str, float], thresholds: T
     ranked = sorted(T.ALL_LABEL_IDS, key=lambda lid: fused[lid].projected, reverse=True)
     primary = ranked[0]
     top = fused[primary].projected
-    runner_up = fused[ranked[1]].projected if len(ranked) > 1 else 0.0
+    runner_up_label = ranked[1] if len(ranked) > 1 else None
+    runner_up = fused[runner_up_label].projected if runner_up_label else 0.0
     margin = top - runner_up
     secondary = [
         lid
@@ -88,9 +90,21 @@ def decide(fused: dict[str, Opinion], conflicts: dict[str, float], thresholds: T
     if conflicts.get(primary, 0.0) >= thresholds.review_required_conflict:
         status = "staff_review_required"
         reasons.append(f"conflict {conflicts[primary]:.2f} >= {thresholds.review_required_conflict}")
-    if status == "ai_suggested" and margin < thresholds.mixed_activity_margin:
+    if top < thresholds.review_required_min_projected:
+        status = "staff_review_required"
+        reasons.append(f"projected {top:.2f} < {thresholds.review_required_min_projected}")
+    # Mixed means two activities are both clearly present: the runner-up must be an
+    # activity label that clears the confidence floor on its own, not merely close.
+    if (
+        status == "ai_suggested"
+        and runner_up_label in T.ACTIVITY_IDS
+        and runner_up >= thresholds.review_required_min_projected
+        and margin < thresholds.mixed_activity_margin
+    ):
         status = "mixed_activity"
-        reasons.append(f"margin {margin:.2f} < {thresholds.mixed_activity_margin}")
+        reasons.append(
+            f"{runner_up_label} also present (P {runner_up:.2f}, margin {margin:.2f} < {thresholds.mixed_activity_margin})"
+        )
 
     return Decision(
         primary=primary,
