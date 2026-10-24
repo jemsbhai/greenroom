@@ -1,0 +1,56 @@
+# Deployable profile: a single T4-class GPU (16 GB) or comparable low-cost box.
+# Same pipeline, smaller models, fewer frames; the ablation measures what is lost.
+name: t4
+device: cuda
+window_seconds: 5
+
+asr:
+  backend: faster-whisper
+  model: distil-large-v3
+  compute_type: int8_float16
+  vad_filter: true
+  no_speech_threshold: 0.6
+  language: en
+
+audio_events:
+  clap_model: laion/larger_clap_music_and_speech
+  clap_fallback_model: laion/clap-htsat-unfused
+  ast_model: null
+  analysis_window_seconds: 10
+  hop_seconds: 5
+
+vision:
+  model: google/siglip-base-patch16-224
+  frames_per_window: 2
+  frame_height: 256
+  sample_fps: 0.5
+  detector: facebook/detr-resnet-50
+  detector_person_threshold: 0.7
+
+transcript_llm:
+  backend: ollama
+  model: qwen2.5:3b-instruct
+  context_pad_seconds: 20
+  temperature: 0.0
+  think: false
+
+vlm:
+  model: Qwen/Qwen2.5-VL-3B-Instruct
+  frames: 4
+  candidates_only: true
+  max_new_tokens: 80
+
+fusion:
+  prior_weight: 2.0
+  evidence_weight:
+    audio: 10.0
+    vision: 10.0
+    transcript: 5.0
+  thresholds:
+    secondary_min_projected: 0.35
+    review_required_uncertainty: 0.5
+    review_required_conflict: 0.3
+    mixed_activity_margin: 0.1
+
+energy:
+  nvml: true
