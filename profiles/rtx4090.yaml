@@ -64,6 +64,11 @@ fusion:
       neg: 4.0
       score_mode: relative_top
       competitors: 15       # taxonomy labels competing in the X-CLIP softmax
+    ast:
+      pos: 10.0
+      neg: 1.5
+      score_mode: raw       # AudioSet sigmoid mass on mapped classes; absence is weak evidence
+      competitors: 527
     videomae:
       pos: 10.0
       neg: 1.5

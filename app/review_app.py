@@ -226,6 +226,14 @@ def main() -> None:
             st.markdown("Also suggested: " + ", ".join(_name(s) for s in record["secondary_activities"]))
         if record.get("review_reasons"):
             st.caption("Why this is in the queue: " + "; ".join(record["review_reasons"]))
+        speech = record.get("speech")
+        if speech:
+            flag = record.get("facilitation_flag")
+            st.caption(
+                f"Speech: {speech.get('speech_kind', 'unclear')} ({speech.get('word_count', 0)} words); "
+                f"facilitation: {'yes' if flag else 'no' if flag is False else 'unclear'} "
+                f"(confidence {speech.get('facilitation_confidence', 0.0):.2f}). {speech.get('rationale', '')}"
+            )
         with st.expander("Evidence behind the suggestion"):
             st.caption("Fused opinions, top labels")
             st.dataframe(_label_table(record), use_container_width=True, hide_index=True)

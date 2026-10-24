@@ -38,7 +38,7 @@ A local, open-source pipeline that takes one TPA recording, cuts it into fixed 5
 From the brief:
 
 - Local, open-source, Hugging Face models. No provided file or derived content ever leaves the laptop. HF private endpoints are allowed under the $20 credit only with everything set to Private (used, if at all, only for the T4 timing measurement, D11).
-- No facial recognition, no face embeddings, no identity registries. We also do not do face-based affect; see D7.
+- No facial recognition, no face embeddings, no identity registries. Face-based expression analysis is permitted for the hackathon demo by the organizers' clarification of October 24 (Dr. Umapathy: models and data must not leave the team's system); it runs in memory only, stores no face material, and produces unverified suggestions. See D7 and D19.
 - No clinical or psychological claims. Expression labels are unverified suggestions only.
 - Target hardware for the deployable profile: a single T4-class GPU (16 GB). Development runs on the RTX 4090 laptop (16 GB VRAM, 64 GB RAM).
 - Zero public exposure: no youth footage, frames, audio, transcripts or participant-level annotations in any repo, slide, DevPost page or recording. See D9.
@@ -127,8 +127,10 @@ Two vision sub-channels, each producing its own opinions so the gold set can tel
 
 ### 4.8 Expression suggestions (Target 2 of the brief)
 
-- The brief asks Track A systems to propose generalized expression labels (Confident, Upset, Positive, Neutral, Negative) as unverified suggestions. We derive them from transcript text only (the local LLM maps the words of the window to one of the five, or to "no suggestion" when there is no speech). Nothing is derived from faces or body pose (D7).
-- In the review app these suggestions are collapsed behind a "show unverified AI suggestion" toggle, carry the status ai_suggested_unverified, and never enter any aggregate unless a staff member accepts or edits them.
+- The brief asks Track A systems to propose generalized expression labels (Confident, Upset, Positive, Neutral, Negative) as unverified suggestions. Two sources, both unverified by construction:
+  - A dedicated face-expression model (src/greenroom/expressions.py, D19): OpenCV's bundled Haar cascade finds frontal faces on 540 px frames sampled at 1 fps; each face region is classified in memory by an image model fine-tuned for facial expressions (trpakov/vit-face-expression, fallback dima806/facial_emotions_image_detection). Nothing per face is kept: no crop, no box, no embedding, no track. The window record stores only the aggregated mixture (share of readings positive, neutral, negative), an upset share, the number of readings and the model id. The suggestion is Positive, Neutral, Negative or Upset; Confident is never produced from a face. Enabled by profile switch; off in the t4 profile.
+  - The transcript channel (4.5) maps the participant's own words to the same vocabulary when there is speech.
+- In the review app these suggestions are collapsed behind a "show unverified AI suggestion" toggle, carry the status ai_suggested_unverified, and never enter any aggregate unless a staff member accepts or edits them. The system card states the known limits of expression models (posed adult training faces, uneven performance across skin tones, ages and lighting; an expression is not an emotion; performers act).
 
 ### 4.9 Records (src/greenroom/records.py)
 
@@ -277,7 +279,7 @@ Stages run one after another and release the GPU between them, because a laptop 
 ## 9. Governance and privacy, by construction
 
 - GREENROOM_DATA_DIR points outside the repo and config.data_dir() refuses a data directory inside the repo; .gitignore excludes data, derived caches, databases, media of any kind as a second fence.
-- No face crops, embeddings, voiceprints or identity structures exist anywhere in the pipeline. Person detection counts boxes and discards them.
+- No face crops, embeddings, voiceprints or identity structures are ever written. The expression stage detects faces in memory, classifies the region, and discards it; only per-window aggregate shares survive. Person detection counts boxes and discards them.
 - Transcripts are personal narrative and stay local; they are never exported in the DevPost sample. Samples for public artifacts (sample records, screenshots, demo recording) come from the openly licensed public footage (D9, D13).
 - The LLM client refuses cloud-routed Ollama models (D17), so a misconfiguration cannot send transcript text off the laptop.
 - Review decisions are sealed (pollard); `greenroom verify` detects any edit to the log.
@@ -331,7 +333,7 @@ Order of operations, not a schedule. Each phase ends with something that runs en
 - D4 (default, in effect): CLAP primary audio channel, AST second channel on the rtx4090 profile only.
 - D5 (default, in effect): SigLIP so400m-384 on rtx4090, base-224 on t4; DETR for person counts.
 - D6 (resolved): transcript LLM served by Ollama; qwen2.5:7b-instruct must be pulled, since only cloud-routed models are present on the machine.
-- D7 (recommended, pending): expression suggestions are transcript-derived only, shown behind a toggle, status ai_suggested_unverified; no face-based affect anywhere.
+- D7 (revised, see D19): expression suggestions come from the face-expression model and from transcript text, both shown behind a toggle with status ai_suggested_unverified, never aggregated unless staff-accepted.
 - D8 (revised): no teammate labeling; labeling is part of the product (staff review). Validation comes from file-name weak labels, logged review decisions, inter-channel diagnostics and any disclosed blind labels, as in 8.1. The gold app stays in the repo as the blind-labeling tool for anyone who has time.
 - D9 (recommended, pending): all persisted public artifacts (repo, samples, slides, DevPost, demo recording) use openly licensed public footage only; repo private during the event with organizers added.
 - D10 (default, in effect): ablation baselines as in 6.4; results reported whether or not SL fusion wins.
@@ -342,6 +344,7 @@ Order of operations, not a schedule. Each phase ends with something that runs en
 - D15 (default, in effect): Streamlit for the gold and review apps.
 - D16 (resolved): no virtual environment on the development machine; the package and its dependencies are installed into the system Python 3.12 next to the existing torch 2.6.0+cu124, and pins are captured with `pip freeze > requirements.lock` once the first full run succeeds.
 - D17 (default, in effect): the LLM client refuses cloud-routed Ollama models (":cloud" tags); `python -m greenroom env` reports which models on the machine are local.
+- D19 (decided by Muntaser, October 24, against Claude's recommendation; authorized for the hackathon demo by Dr. Umapathy's clarification that face expression analysis is acceptable as long as models and data do not leave the team's system): a dedicated face-expression model runs as a pipeline stage under the constraints in 4.8 (in-memory only, aggregate mixtures only, no crops, boxes, embeddings or tracks, no Confident, kill switch in the profile). Expression analysis only; identity recognition is not built and not needed. The clarification is to be obtained in writing and quoted in docs/DATA_GOVERNANCE.md.
 - D18 (default, in effect): the vision evidence comes from two sub-channels, X-CLIP zero-shot (motion-aware, covers every label through prompts) and VideoMAE Kinetics-400 supervised (mapped classes only), each as its own opinion; SigLIP per-frame is an ablation option, not a default. The team repo's models are not reused: its CLIP baseline is the weaker per-frame version of the same idea, its X-CLIP use fed repeated still frames and never ran end to end, and its FaceNet and expression code is outside the rules.
 
 ## Appendix A: folder layout on the laptop

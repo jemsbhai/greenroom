@@ -104,12 +104,33 @@ XCLIP_PROMPTS: dict[str, list[str]] = {
     ],
 }
 
+# Labels a camera cannot tell apart. A vision channel that sees a person at a
+# microphone has no information to separate singing from rapping, so both
+# members of a group receive the group's summed support and the audio channels
+# break the tie. Applied to every vision channel's label scores.
+VISUAL_EQUIVALENCE: list[tuple[str, ...]] = [
+    ("singing_vocal_performance", "lyricism_spoken_word_rap"),
+]
+
+
+def apply_visual_equivalence(scores: dict[str, float]) -> dict[str, float]:
+    out = dict(scores)
+    for group in VISUAL_EQUIVALENCE:
+        present = [lid for lid in group if lid in out]
+        if len(present) >= 1:
+            total = min(1.0, sum(out[lid] for lid in present))
+            for lid in group:
+                out[lid] = total
+    return out
+
+
 # Kinetics-400 class name patterns -> taxonomy labels. Applied to the model's
 # own id2label names at load time; the resolved mapping is written to run_meta
 # so it can be audited. Mass from several classes is summed per label.
 KINETICS_RULES: list[tuple[str, tuple[str, ...]]] = [
     (r"danc|zumba|krumping|cheerleading", ("dance",)),
     (r"\bsinging\b", ("singing_vocal_performance",)),
+    (r"recording music", ("recording_arts_audio_production",)),
     (r"applaud|clapping", ("audience_applause_transition",)),
     (r"drawing|painting|sketch", ("visual_arts",)),
     (r"\bwriting\b", ("songwriting", "visual_arts")),
@@ -312,7 +333,7 @@ class XClipScorer(_VisionScorerBase):
         scores = {lid: 0.0 for lid in T.ALL_LABEL_IDS}
         for lid, p in zip(self.prompt_label, row.tolist()):
             scores[lid] += p
-        return scores, {}
+        return apply_visual_equivalence(scores), {}
 
 
 class VideoMaeScorer(_VisionScorerBase):
@@ -348,4 +369,7 @@ class VideoMaeScorer(_VisionScorerBase):
             for lid in labels:
                 scores[lid] = min(1.0, scores.get(lid, 0.0) + p)
         top = int(np.argmax(row))
-        return scores, {"top_kinetics_class": self.id2label[top], "top_kinetics_prob": round(float(row[top]), 4)}
+        return apply_visual_equivalence(scores), {
+            "top_kinetics_class": self.id2label[top],
+            "top_kinetics_prob": round(float(row[top]), 4),
+        }

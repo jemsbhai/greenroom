@@ -20,7 +20,7 @@ from .opinions import Opinion, from_score, relative_support, vacuous
 from .records import build_record, provenance, write_outputs
 from .windows import load_index, merge_runs, windows_for_video
 
-STAGES = ("audio", "vision")
+STAGES = ("audio", "vision", "transcript")
 
 
 def base_rates(profile: dict) -> dict[str, float]:
@@ -116,6 +116,15 @@ def _load_models(profile: dict, stages: tuple[str, ...], want_gpu: bool, log) ->
                 cfg.get("clap_model", "laion/larger_clap_music_and_speech"), cfg.get("clap_fallback_model"), device=device
             )
         log(f"audio model {models['audio'].model_id} on {models['audio'].device} ({m.wall_seconds:.1f} s)")
+        if cfg.get("ast_model"):
+            from .audio_events import AudioSetScorer
+
+            with StageMeter("load_ast", gpu=want_gpu) as m:
+                models["ast"] = AudioSetScorer(cfg["ast_model"], device=device)
+            log(
+                f"ast {models['ast'].model_id}, {len(models['ast'].class_map)} AudioSet classes mapped "
+                f"to taxonomy labels ({m.wall_seconds:.1f} s)"
+            )
     if "vision" in stages:
         from .vision_tags import VideoMaeScorer, XClipScorer
 
@@ -132,6 +141,24 @@ def _load_models(profile: dict, stages: tuple[str, ...], want_gpu: bool, log) ->
                 f"videomae {models['videomae'].model_id}, {models['videomae'].num_frames} frames per window, "
                 f"{len(mapped)} Kinetics classes mapped to taxonomy labels ({m.wall_seconds:.1f} s)"
             )
+    if "transcript" in stages:
+        from .transcribe import Transcriber
+        from .transcript_cues import OllamaCueModel
+
+        asr = profile.get("asr") or {}
+        with StageMeter("load_asr", gpu=want_gpu) as m:
+            models["asr"] = Transcriber(
+                asr.get("model", "large-v3"), asr.get("compute_type", "float16"), device="cuda" if device == "cuda" else device
+            )
+        log(f"asr {models['asr'].model_id} ({m.wall_seconds:.1f} s)")
+        llm = profile.get("transcript_llm") or {}
+        with StageMeter("load_cue_model", gpu=False) as m:
+            models["cues"] = OllamaCueModel(
+                llm.get("model", "qwen2.5:7b-instruct"),
+                host=llm.get("host", "http://127.0.0.1:11434"),
+                temperature=float(llm.get("temperature", 0.0)),
+            )
+        log(f"transcript cues via {models['cues'].model_id}, local only ({m.wall_seconds:.1f} s)")
     return models
 
 
@@ -189,6 +216,20 @@ def run_videos(
             channel_outputs["audio"] = [s.to_dict() for s in scores]
             _release_gpu()
 
+        if "ast" in models:
+            with StageMeter("ast", gpu=want_gpu) as m_ast:
+                scores, meta = models["ast"].score_windows(
+                    wav, windows, analysis_s=float(audio_cfg.get("analysis_window_seconds", 10.0))
+                )
+            stage_meta["ast"] = {**m_ast.to_dict(), **meta}
+            model_ids.append(models["ast"].model_id)
+            s_ast = settings.get("ast", {**DEFAULT_CHANNEL, "neg": 1.5})
+            for s in scores:
+                per_window[s.window_id]["ast"] = scores_to_opinions(s.label_scores, s.quality, s_ast, rates, prior_weight)
+            channel_outputs["ast"] = [s.to_dict() for s in scores]
+            extra_meta["audioset_to_taxonomy"] = models["ast"].resolved_mapping()
+            _release_gpu()
+
         if "xclip" in models or "videomae" in models:
             sample_fps = float(vision_cfg.get("sample_fps", 4.0))
             with StageMeter("sample_frames", gpu=False) as m_frames:
@@ -218,6 +259,45 @@ def run_videos(
                     extra_meta["kinetics_to_taxonomy"] = scorer.resolved_mapping()
                 _release_gpu()
 
+        cue_by_window: dict[str, dict] = {}
+        if "asr" in models and "cues" in models:
+            from .transcribe import load_or_transcribe
+            from .transcript_cues import score_windows as score_cues
+
+            asr = profile.get("asr") or {}
+            llm = profile.get("transcript_llm") or {}
+            wav = extract_audio(source, config.audio_dir() / f"{video_id}.wav")
+            with StageMeter("transcribe", gpu=want_gpu) as m_asr:
+                transcript, from_cache = load_or_transcribe(
+                    models["asr"], video_id, wav, asr.get("language", "en"), bool(asr.get("vad_filter", True))
+                )
+            stage_meta["transcribe"] = {
+                **m_asr.to_dict(),
+                "model_id": models["asr"].model_id,
+                "from_cache": from_cache,
+                "segments": len(transcript.get("segments", [])),
+                "words": sum(len(s.get("words", [])) for s in transcript.get("segments", [])),
+            }
+            model_ids.append(models["asr"].model_id)
+            _release_gpu()
+            with StageMeter("transcript_cues", gpu=want_gpu) as m_cue:
+                cues, meta = score_cues(
+                    models["cues"],
+                    transcript,
+                    windows,
+                    context_pad_s=float(llm.get("context_pad_seconds", 20.0)),
+                    no_speech_threshold=float(asr.get("no_speech_threshold", 0.6)),
+                    log=log,
+                )
+            stage_meta["transcript_cues"] = {**m_cue.to_dict(), **meta}
+            model_ids.append(models["cues"].model_id)
+            s_tr = settings.get("transcript", {**DEFAULT_CHANNEL, "pos": 5.0, "neg": 2.0})
+            for c in cues:
+                if c.label_scores:
+                    per_window[c.window_id]["transcript"] = scores_to_opinions(c.label_scores, c.quality, s_tr, rates, prior_weight)
+                cue_by_window[c.window_id] = c.to_dict()
+            channel_outputs["transcript"] = [c.to_dict() for c in cues]
+
         prov = provenance(profile, model_ids, list(stages))
         records: list[dict] = []
         with StageMeter("fusion_and_records", gpu=False) as m_fuse:
@@ -225,7 +305,19 @@ def run_videos(
                 mods = per_window[w["window_id"]]
                 fused, conflicts = fuse_labels(mods, rates, method=fusion_method)
                 decision = decide(fused, conflicts, thresholds)
-                records.append(build_record(w, fused, conflicts, decision, mods, prov))
+                cue = cue_by_window.get(w["window_id"]) or {}
+                facilitation = None
+                if cue.get("facilitation") is not None and cue.get("facilitation_confidence", 0.0) >= 0.5:
+                    facilitation = bool(cue["facilitation"])
+                record = build_record(w, fused, conflicts, decision, mods, prov, facilitation_flag=facilitation)
+                if cue:
+                    record["speech"] = {
+                        "word_count": cue.get("word_count", 0),
+                        "speech_kind": cue.get("speech_kind", "unclear"),
+                        "facilitation_confidence": cue.get("facilitation_confidence", 0.0),
+                        "rationale": cue.get("rationale", ""),
+                    }
+                records.append(record)
             segments = merge_runs([r["primary_activity"] for r in records], windows)
         stage_meta["fusion_and_records"] = m_fuse.to_dict()
 
@@ -264,7 +356,7 @@ def run_videos(
         with (config.records_dir() / "runs.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
-                    {k: v for k, v in run_meta.items() if k not in ("channel_outputs", "kinetics_to_taxonomy")}
+                    {k: v for k, v in run_meta.items() if k not in ("channel_outputs", "kinetics_to_taxonomy", "audioset_to_taxonomy")}
                     | {"written_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
                 )
                 + "\n"

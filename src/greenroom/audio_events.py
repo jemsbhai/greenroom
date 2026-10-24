@@ -82,6 +82,38 @@ AUDIO_CLASSES: dict[str, dict] = {
 
 AUDIO_OBSERVABLE_LABELS: list[str] = sorted({lbl for spec in AUDIO_CLASSES.values() for lbl in spec["labels"]})
 
+# AudioSet class-name patterns -> taxonomy labels, for the second audio channel
+# (AST). Resolved against the model's own id2label at load time and written to
+# run_meta. Speech, music and instrument classes stay context only: a song bed
+# under a montage must not count as recording arts. The parent class "Singing"
+# is also context only: in the AudioSet ontology "Rapping" is its child, so the
+# parent fires on rap and would erase the rap label; only the specific singing
+# classes count as singing.
+AUDIOSET_RULES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        r"\b(male|female|child|synthetic) singing\b|\bchoir\b|\bchant\b|\bhumming\b|yodeling|a capella|\bopera\b",
+        ("singing_vocal_performance",),
+    ),
+    (r"\brapping\b|beatboxing", ("lyricism_spoken_word_rap",)),
+    (r"applause|\bclapping\b|cheering|\bcrowd\b|hubbub|speech noise", ("audience_applause_transition",)),
+    (r"^silence$", ("setup_idle_empty",)),
+]
+
+
+def map_audioset_classes(id2label: dict[int, str]) -> dict[int, tuple[str, ...]]:
+    import re
+
+    mapping: dict[int, tuple[str, ...]] = {}
+    for idx, name in id2label.items():
+        lowered = name.lower()
+        labels: list[str] = []
+        for pattern, targets in AUDIOSET_RULES:
+            if re.search(pattern, lowered):
+                labels.extend(t for t in targets if t not in labels)
+        if labels:
+            mapping[int(idx)] = tuple(labels)
+    return mapping
+
 
 @dataclass
 class WindowAudioScore:
@@ -94,7 +126,7 @@ class WindowAudioScore:
         return {
             "window_id": self.window_id,
             "quality": round(self.quality, 4),
-            "class_probs": {k: round(v, 4) for k, v in self.class_probs.items()},
+            "class_probs": {k: (round(v, 4) if isinstance(v, float) else v) for k, v in self.class_probs.items()},
             "label_scores": {k: round(v, 4) for k, v in self.label_scores.items()},
         }
 
@@ -188,10 +220,12 @@ class AudioEventScorer:
                 class_probs = {cid: 0.0 for cid in AUDIO_CLASSES}
                 for cid, p in zip(self.prompt_class, row.tolist()):
                     class_probs[cid] += p
+                # Classes are mutually exclusive under the softmax, so the mass of every
+                # class that supports a label adds up (rap + spoken word both mean lyricism).
                 label_scores: dict[str, float] = {}
                 for cid, spec in AUDIO_CLASSES.items():
                     for lbl in spec["labels"]:
-                        label_scores[lbl] = max(label_scores.get(lbl, 0.0), class_probs[cid])
+                        label_scores[lbl] = min(1.0, label_scores.get(lbl, 0.0) + class_probs[cid])
                 results.append(WindowAudioScore(window["window_id"], quality, class_probs, label_scores))
             pending.clear()
 
@@ -217,6 +251,105 @@ class AudioEventScorer:
             "analysis_seconds": analysis_s,
             "noise_floor_rms": round(floor, 6),
             "audio_seconds": round(len(y) / sr, 3),
+            "wall_seconds": round(time.perf_counter() - t0, 3),
+        }
+        return results, meta
+
+
+AST_SAMPLE_RATE = 16_000
+
+
+class AudioSetScorer:
+    """Second audio channel: AST fine-tuned on AudioSet (multi-label, sigmoid over 527 classes).
+
+    Scores are the sigmoid probabilities of the mapped classes, summed per
+    taxonomy label and clipped to 1. Unmapped classes (speech, music,
+    instruments) are context and never become evidence. Reads the 16 kHz WAV
+    directly; nothing identity-related is computed.
+    """
+
+    def __init__(self, model_id: str, device: str | None = None):
+        import torch
+        from transformers import ASTForAudioClassification, AutoFeatureExtractor
+
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_id = model_id
+        self.extractor = AutoFeatureExtractor.from_pretrained(model_id)
+        self.model = ASTForAudioClassification.from_pretrained(model_id).eval().to(self.device)
+        self.id2label = {int(k): v for k, v in self.model.config.id2label.items()}
+        self.class_map = map_audioset_classes(self.id2label)
+
+    def resolved_mapping(self) -> dict[str, list[str]]:
+        return {self.id2label[idx]: list(labels) for idx, labels in sorted(self.class_map.items())}
+
+    def _batch_probs(self, segments: list[np.ndarray]) -> np.ndarray:
+        import torch
+
+        inputs = self.extractor(segments, sampling_rate=AST_SAMPLE_RATE, return_tensors="pt")
+        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        with torch.inference_mode():
+            logits = self.model(**inputs).logits
+            probs = torch.sigmoid(logits)
+        return probs.float().cpu().numpy()
+
+    def score_windows(
+        self,
+        wav_path: str | Path,
+        windows: list[dict],
+        analysis_s: float = 10.0,
+        batch_size: int = 16,
+        min_segment_s: float = 1.0,
+    ) -> tuple[list[WindowAudioScore], dict]:
+        import soundfile as sf
+
+        t0 = time.perf_counter()
+        y, sr = sf.read(str(wav_path), dtype="float32", always_2d=False)
+        if getattr(y, "ndim", 1) > 1:
+            y = y.mean(axis=1)
+        if sr != AST_SAMPLE_RATE:
+            import librosa
+
+            y = librosa.resample(y, orig_sr=sr, target_sr=AST_SAMPLE_RATE)
+            sr = AST_SAMPLE_RATE
+        floor = noise_floor(y, sr)
+        results: list[WindowAudioScore] = []
+        pending: list[tuple[dict, np.ndarray, float]] = []
+
+        def flush() -> None:
+            if not pending:
+                return
+            probs = self._batch_probs([seg for _, seg, _ in pending])
+            for (window, _, quality), row in zip(pending, probs):
+                label_scores: dict[str, float] = {}
+                for idx, labels in self.class_map.items():
+                    p = float(row[idx])
+                    for lbl in labels:
+                        label_scores[lbl] = min(1.0, label_scores.get(lbl, 0.0) + p)
+                top = int(np.argmax(row))
+                class_probs = {"top_audioset_class": self.id2label[top], "top_audioset_prob": round(float(row[top]), 4)}
+                results.append(WindowAudioScore(window["window_id"], quality, class_probs, label_scores))
+            pending.clear()
+
+        for window in windows:
+            center = 0.5 * (window["start_s"] + window["end_s"])
+            a = max(0.0, center - analysis_s / 2.0)
+            b = min(len(y) / sr, a + analysis_s)
+            seg = y[int(a * sr) : int(b * sr)]
+            if len(seg) < int(min_segment_s * sr):
+                results.append(WindowAudioScore(window["window_id"], 0.0, {}, {}))
+                continue
+            pending.append((window, seg, signal_quality(seg, sr, floor)))
+            if len(pending) >= batch_size:
+                flush()
+        flush()
+        order = {w["window_id"]: i for i, w in enumerate(windows)}
+        results.sort(key=lambda r: order[r.window_id])
+        meta = {
+            "model_id": self.model_id,
+            "device": self.device,
+            "analysis_seconds": analysis_s,
+            "noise_floor_rms": round(floor, 6),
+            "mapped_classes": len(self.class_map),
             "wall_seconds": round(time.perf_counter() - t0, 3),
         }
         return results, meta

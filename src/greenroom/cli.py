@@ -6,6 +6,8 @@
     python -m greenroom run ...             run the pipeline on one or more videos
     python -m greenroom review-app          print the command that starts the staff review app
     python -m greenroom verify              check the hash chain of every review ledger
+    python -m greenroom report              write <data>/records/report.md and report.json (results numbers)
+    python -m greenroom purge --yes         delete every derived artifact (audio, frames, clips, records); videos untouched
 """
 from __future__ import annotations
 
@@ -152,6 +154,35 @@ def cmd_verify(_: argparse.Namespace) -> int:
     return 1 if bad else 0
 
 
+def cmd_report(_: argparse.Namespace) -> int:
+    from .report import write_report
+
+    out_md, out_json, md = write_report()
+    print(md)
+    print(f"\nwritten: {out_md}\n         {out_json}")
+    return 0
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    import shutil
+
+    targets = [config.derived_dir()]
+    if not args.keep_records:
+        targets.append(config.records_dir())
+    if not args.yes:
+        print("This deletes:")
+        for t in targets:
+            print(f"  {t}")
+        print("The provided videos are not touched. Re-run with --yes to proceed.")
+        return 2
+    for t in targets:
+        if t.is_dir():
+            shutil.rmtree(t)
+            print(f"deleted {t}")
+    print("derived artifacts removed; videos untouched")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="greenroom", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -181,6 +212,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_verify = sub.add_parser("verify", help="check the hash chain of every review ledger")
     p_verify.set_defaults(func=cmd_verify)
+
+    p_report = sub.add_parser("report", help="results report from records, ledgers and run metadata")
+    p_report.set_defaults(func=cmd_report)
+
+    p_purge = sub.add_parser("purge", help="delete derived artifacts under the data directory; the videos are not touched")
+    p_purge.add_argument("--yes", action="store_true", help="actually delete (without it, only lists what would go)")
+    p_purge.add_argument("--keep-records", action="store_true", help="keep records and review ledgers")
+    p_purge.set_defaults(func=cmd_purge)
     return parser
 
 
