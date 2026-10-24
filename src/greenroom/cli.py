@@ -3,6 +3,7 @@
     python -m greenroom env                 check the environment and the data directory
     python -m greenroom windows [--subclips] build the window index (and review subclips)
     python -m greenroom gold-app            print the command that starts the gold labeling app
+    python -m greenroom run ...             run the pipeline on one or more videos
 """
 from __future__ import annotations
 
@@ -102,6 +103,29 @@ def cmd_gold_app(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    from .pipeline import STAGES, run_videos
+
+    profile = config.load_profile(args.profile)
+    index = load_index(config.windows_index_path())
+    if args.all:
+        video_ids = [v["video_id"] for v in index["videos"]]
+    else:
+        video_ids = list(args.video or [])
+    if not video_ids:
+        print("Give --video <id> (repeatable) or --all. Known ids:")
+        for v in index["videos"]:
+            print(f"  {v['video_id']}")
+        return 2
+    stages = tuple(args.stages.split(",")) if args.stages else STAGES
+    unknown = [s for s in stages if s not in STAGES]
+    if unknown:
+        print(f"unknown stage(s) {unknown}; available in this build: {STAGES}")
+        return 2
+    run_videos(video_ids, profile, stages=stages, fusion_method=args.fusion, index=index)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="greenroom", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -117,6 +141,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_gold = sub.add_parser("gold-app", help="print the command that starts the gold labeling app")
     p_gold.set_defaults(func=cmd_gold_app)
+
+    p_run = sub.add_parser("run", help="run the pipeline and write records under <data>/records/<video_id>/")
+    p_run.add_argument("--profile", default="rtx4090", help="profiles/<name>.yaml")
+    p_run.add_argument("--video", action="append", help="video id from the window index (repeatable)")
+    p_run.add_argument("--all", action="store_true", help="every video in the index")
+    p_run.add_argument("--stages", default=None, help="comma-separated stages; default: all available")
+    p_run.add_argument("--fusion", default="cumulative", choices=["cumulative", "mean", "max"])
+    p_run.set_defaults(func=cmd_run)
     return parser
 
 

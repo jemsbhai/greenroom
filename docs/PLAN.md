@@ -27,11 +27,11 @@ A local, open-source pipeline that takes one TPA recording, cuts it into fixed 5
 | Problem case and track, team, contacts | README.md header |
 | Runnable code and environment | src/, profiles/, requirements.lock, README quickstart |
 | Architecture and workflow diagram | docs/ARCHITECTURE.md (Mermaid, Section 4 below) |
-| Structured output file (time-stamped, multi-label) | samples/annotations.sample.jsonld and .csv, generated from team-recorded footage only (D9) |
+| Structured output file (time-stamped, multi-label) | samples/annotations.sample.jsonld and .csv, generated from openly licensed public footage only (D9, D13) |
 | Review and annotation interface (accept, edit, reject, defer) | app/review_app.py |
 | Model/System card | docs/SYSTEM_CARD.md |
 | Data-governance note | docs/DATA_GOVERNANCE.md |
-| Demonstration (end-to-end) | docs/DEMO_SCRIPT.md plus a recorded run on team footage |
+| Demonstration (end-to-end) | docs/DEMO_SCRIPT.md plus a recorded run on the public footage |
 
 ## 3. Constraints and facts we build against
 
@@ -46,8 +46,8 @@ From the brief:
 
 From the data on disk (E:\data\code\claudecode\ai4goodhackathonjax\data\videos):
 
-- 8 of the 12 provided files are present: the intro, the two songwriting clips (deshaun, reese) and the five TikTok promos (painting, dance, rap, singing, boots). The four multi-gigabyte files (final video 1.67 GB, Live Camp2 12.01 GB, camp2 montage 2.05 GB, final show camp1 8.11 GB) were not pulled. Durations and window counts come from `python -m greenroom windows` and are recorded in the window index, not estimated here.
-- Consequence: the provided footage is a set of short, mostly edited clips, not hours of raw workshop video. The long-form behavior of the system (dead time, transitions, hour-scale throughput) therefore has to be tested on footage we record ourselves (D13), and the TPA gold set is a census of every window rather than a sample (D12).
+- 9 of the 12 provided files are present: the 2025 final video (1.67 GB, 15.4 min), the intro (2.9 min), the two songwriting clips (deshaun 3.8 min, reese 2.5 min) and the five TikTok promos (painting, dance, rap, singing, boots; 2.1 min together). Measured by `python -m greenroom windows`: 26.8 minutes, 323 windows of 5 s. The three largest files (Live Camp2 12.01 GB, camp2 montage 2.05 GB, final show camp1 8.11 GB) were not pulled.
+- Consequence: the provided footage is a set of short, mostly edited clips, not hours of raw workshop video. The long-form behavior of the system (dead time, transitions, hour-scale throughput) therefore has to be tested on openly licensed public footage of adult performers (D13), and the TPA gold set is a census of every window rather than a sample (D12). Recording in the venue is not permitted, so there is no team-recorded footage.
 
 From the existing team repository (github.com/kushulreddy39/performers-academy-video-analysis, cloned next to this folder):
 
@@ -239,7 +239,7 @@ E_m per modality and the base rates are fitted on the calibration split (Section
 | Transcript LLM | qwen2.5:7b-instruct (Ollama) | qwen2.5:3b-instruct (Ollama) |
 | VLM | Qwen2.5-VL-7B-Instruct on candidates | Qwen2.5-VL-3B-Instruct on candidates |
 
-Stages run one after another and release the GPU between them, because a laptop 4090 has 16 GB. Throughput (minutes of video processed per minute of wall clock) and GPU energy (NVML, joules per hour of video) are logged per stage for every run. The t4 profile is measured for real only if D11 is approved (private HF endpoint on the credit); otherwise it is run on the 4090 with the t4 model set and reported as such, with no claim about T4 timing.
+Stages run one after another and release the GPU between them, because a laptop 4090 has 16 GB. Throughput (minutes of video processed per minute of wall clock) and GPU energy (NVML, joules per hour of video) are logged per stage for every run. The t4 profile is measured for real on a private Hugging Face T4 job over the public footage (D11); until that run exists it is run on the 4090 with the t4 model set and reported as such, with no claim about T4 timing.
 
 ## 8. Evaluation plan (the 40%)
 
@@ -248,7 +248,7 @@ Stages run one after another and release the GPU between them, because a laptop 
 - Unit: the 5-second window (D12). Metrics are computed on the system's own units and gold labels share them exactly.
 - TPA footage: a census. Two annotators label every window of all 8 files independently in gold mode (no model output visible) using guideline v1.0; disagreements are adjudicated jointly by the two annotators; the pipeline author takes no part in labeling or adjudication. Inter-annotator agreement is reported (Cohen's kappa on the primary label, per-label kappa for secondary labels and the facilitation flag).
 - Calibration split: a fixed, seeded 20% of TPA windows stratified by video, used for evidence weights, base rates and thresholds. The remaining 80% is the test split. The split is written to the data directory before any threshold is chosen.
-- Team footage (D13): 45 to 60 minutes of continuous footage recorded by the team. Two annotators label a seeded stratified sample of 200 windows (strata: the pipeline's preliminary primary label and the person-count bucket, so dead time and transitions are represented) plus every window the pipeline marks review-required. Reported separately from the TPA numbers, never pooled.
+- Public footage (D13): 45 to 90 minutes of openly licensed recordings of adult performing-arts events (recitals, open mics, poetry slams, rehearsals, workshops), sourced and license-checked by the teammates, kept under data\public\videos with attribution in docs/PUBLIC_FOOTAGE.md. Two annotators label a seeded stratified sample of 200 windows (strata: the pipeline's preliminary primary label and the person-count bucket, so dead time and transitions are represented) plus every window the pipeline marks review-required. Reported separately from the TPA numbers, never pooled.
 - Because adjacent windows of one clip are correlated, every confidence interval is a cluster bootstrap by video (1000 resamples), not an i.i.d. bootstrap over windows.
 
 ### 8.2 Metrics
@@ -271,7 +271,7 @@ Stages run one after another and release the GPU between them, because a laptop 
 
 - GREENROOM_DATA_DIR points outside the repo and config.data_dir() refuses a data directory inside the repo; .gitignore excludes data, derived caches, databases, media of any kind as a second fence.
 - No face crops, embeddings, voiceprints or identity structures exist anywhere in the pipeline. Person detection counts boxes and discards them.
-- Transcripts are personal narrative and stay local; they are never exported in the DevPost sample. Samples for public artifacts come from team-recorded footage of consenting adults (D9).
+- Transcripts are personal narrative and stay local; they are never exported in the DevPost sample. Samples for public artifacts (sample records, screenshots, demo recording) come from the openly licensed public footage (D9, D13).
 - The LLM client refuses cloud-routed Ollama models (D17), so a misconfiguration cannot send transcript text off the laptop.
 - Review decisions are sealed (pollard); `greenroom verify` detects any edit to the log.
 - Retention: scripts/purge_derived.py removes all derived artifacts; the data-governance note specifies that the team deletes its copies after the handover the organizers request, and that records are keyed by video_id so a consent withdrawal removes everything for that recording. The hashrope erasure-compatible redaction design is described as future work in the note, not built.
@@ -286,28 +286,28 @@ Teammate A (annotation lead)
 - Owns guideline v1.0 wording (with Muntaser's taxonomy), labels every TPA window in the gold app, adjudicates with Teammate B, runs the IAA script, drafts the data-governance note from the outline in Section 9, builds the Motivation and Implications slides.
 
 Teammate B (review and demo lead)
-- Second gold annotator; runs the staff-time pilot (8.3); writes the demo script and records the public demo on team footage; writes the README quickstart by following it on a clean machine; owns the DevPost page text and the slide deck assembly in the organizers' template.
+- Second gold annotator; runs the staff-time pilot (8.3); writes the demo script and records the public demo on the public footage; writes the README quickstart by following it on a clean machine; owns the DevPost page text and the slide deck assembly in the organizers' template.
 
-Shared, and first in time (D13)
-- The two teammates record 45 to 60 minutes of continuous footage in the venue: a mock workshop with a song, a spoken piece, a short dance, someone giving instructions and feedback, a conversation at a table, and deliberate setup and idle stretches. Phone camera on a tripod, one continuous take, no cuts. This is the only footage that appears in any public artifact, it is the long-form test input, and it is the demo input.
+Shared, and early (D13)
+- The two teammates source 45 to 90 minutes of openly licensed public footage of adult performing-arts events (Internet Archive, Wikimedia Commons; no YouTube downloads), verify the license of every file, and write the attribution table in docs/PUBLIC_FOOTAGE.md. This footage is the only material that appears in any persisted public artifact, it is the long-form test input, and it is the default demo input.
 
 ## 11. Presentation plan (template slides)
 
 1. Motivation and problem: TPA's archive, the hour-long files, the staff time, the ethical line (no diagnosis).
 2. Solution summary: the one-paragraph description from Section 1 as three bullets; the architecture figure.
-3. Data: the 8 files and their durations from the index, how windows were made, the gold set and IAA numbers, the team footage and why it exists.
+3. Data: the 8 files and their durations from the index, how windows were made, the gold set and IAA numbers, the public footage and why it exists.
 4. Method: three evidence channels, opinions with uncertainty (one picture of b/d/u bars), fusion, the review loop and the sealed ledger. Explain every technical term in one line; two judges are not ML people.
 5. Results: confusion matrix, per-label F1 with CIs, reliability diagram, risk-coverage curve, ablation table, throughput and energy per hour of video per profile, seconds per staff decision.
 6. Implications and next steps: staff-defined labels, deployment on TPA's own hardware or a T4, consent-aware erasure (hashrope), what would make the labels better (TPA-reviewed data as training signal), risks.
 
-Demo (inside slide 2 or 5): run the pipeline on the team footage live or from the recording, open the review app on the real data (laptop screen only, not in the deck), accept one, edit one, defer one, run `greenroom verify`, export.
+Demo (inside slide 2 or 5): run the pipeline on the public footage live or from a recording, open the review app, accept one, edit one, defer one, run `greenroom verify`, export. Showing the provided footage on screen during the judged presentation is done only if Dr. Umapathy confirms it is acceptable; the numbers from the provided data are on the slides either way, the frames are not.
 
 ## 12. Build sequence
 
 Order of operations, not a schedule. Each phase ends with something that runs end to end.
 
 - Phase 0 (done in this folder): package scaffold, environment check, profiles, data path config with the in-repo guard, window index and review subclips, guideline v1.0, gold labeling app, unit tests.
-- Phase 1: skinny path on one short file: audio extraction, audio events only, opinions, records, merged segments, export. Then the full index and subclips for the team footage as soon as it exists.
+- Phase 1: skinny path on one short file: audio extraction, audio events only, opinions, records, merged segments, export. Then the window index and subclips for the public footage as soon as it is on disk, and a local-only long-form smoke test made by concatenating the provided clips with inserted silence and black gaps (never leaves the laptop).
 - Phase 2: transcript, vision, transcript cues, fusion, decision rules; full run on all 8 files with the rtx4090 profile.
 - Phase 3: pollard ledger and verify, search, review app, aggregates tab, VLM indicators on candidates, expression suggestions behind the toggle.
 - Phase 4: evaluation: gold set frozen, calibration split fitted, metrics, ablations, figures, staff-time pilot, t4 profile run.
@@ -323,11 +323,11 @@ Order of operations, not a schedule. Each phase ends with something that runs en
 - D6 (resolved): transcript LLM served by Ollama; qwen2.5:7b-instruct must be pulled, since only cloud-routed models are present on the machine.
 - D7 (recommended, pending): expression suggestions are transcript-derived only, shown behind a toggle, status ai_suggested_unverified; no face-based affect anywhere.
 - D8 (recommended, pending): gold set protocol as in 8.1, pipeline author excluded from gold labeling and adjudication.
-- D9 (recommended, pending): all public artifacts use team-recorded footage only; repo private during the event with organizers added.
+- D9 (recommended, pending): all persisted public artifacts (repo, samples, slides, DevPost, demo recording) use openly licensed public footage only; repo private during the event with organizers added.
 - D10 (default, in effect): ablation baselines as in 6.4; results reported whether or not SL fusion wins.
-- D11 (resolved): the Hugging Face credit (about $10 per the organizers' email) is spent on one thing: a private T4-class run of the t4 profile over the team-recorded footage, so the deployability claim is measured rather than projected. No provided footage or derived data is uploaded anywhere; all processing of the provided data happens on the laptop. Third-party cloud models (Ollama ':cloud' tags, commercial APIs) are outside the brief's exception and are never used.
+- D11 (resolved): the Hugging Face credit (about $10 per the organizers' email) is spent on one thing: a private T4-class run of the t4 profile over the openly licensed public footage, so the deployability claim is measured rather than projected. No provided footage or derived data is uploaded anywhere; all processing of the provided data happens on the laptop. Third-party cloud models (Ollama ':cloud' tags, commercial APIs) are outside the brief's exception and are never used.
 - D12 (default, in effect): fixed 5-second windows are the unit of labels, scores and metrics; timeline segments are merged runs; cluster bootstrap by video.
-- D13 (recommended, pending): the team records 45 to 60 minutes of continuous consenting-adult footage as the long-form test set, demo input and the only source of public samples.
+- D13 (revised, recommended): recording in the venue is not permitted, so the long-form test set, the demo input and the only source of public samples is openly licensed public footage of adult performing-arts events (Internet Archive, Wikimedia Commons), 45 to 90 minutes in total, each file's license verified and attributed in docs/PUBLIC_FOOTAGE.md, no footage of children even when licensed. A local-only concatenation of the provided clips with inserted gaps serves as an additional dead-time smoke test and never leaves the laptop.
 - D14 (recommended, pending): the submission lives in a new private repository with clean history (greenroom), with the teammates and the organizers added as collaborators; the existing performers-academy-video-analysis repository, whose main branch carries face-recognition exploration, is not referenced in the submission. Fallback if the team insists on the existing repository: an orphan branch with this code force-pushed as the new default branch and every old branch deleted on GitHub before the DevPost link is submitted.
 - D15 (default, in effect): Streamlit for the gold and review apps.
 - D16 (resolved): no virtual environment on the development machine; the package and its dependencies are installed into the system Python 3.12 next to the existing torch 2.6.0+cu124, and pins are captured with `pip freeze > requirements.lock` once the first full run succeeds.
@@ -340,6 +340,7 @@ E:\data\code\claudecode\ai4goodhackathonjax\
   data\videos\                         the 8 provided files (GREENROOM_DATA_DIR = ...\data)
   data\derived\                        audio, subclips, frames, windows.json (created by the tools)
   data\gold\                           gold labels, one JSONL per annotator
+  data\public\videos\                  openly licensed public footage (D13), attribution in docs/PUBLIC_FOOTAGE.md
   greenroom\                           this repository (Phase 0 files)
   performers-academy-video-analysis\   the existing team repo, reference only
 ```

@@ -36,6 +36,11 @@ python -m pytest -q
 
 # gold labeling app (human labels, no model output on screen)
 python -m streamlit run app/gold_app.py --server.address 127.0.0.1
+
+# pipeline (Phase 1: audio channel), records land under <data>/records/<video_id>/
+python -m pip install -e ".[ml]"
+python -m greenroom run --video this-is-me-songwriting-camp2-reese
+python -m greenroom run --all --profile rtx4090
 ```
 
 The `ml` extra (`python -m pip install -e ".[ml]"`) installs the model dependencies for the pipeline stages; `torch` is expected to be installed already (CUDA build). No virtual environment is used on the development machine; pins are captured with `pip freeze > requirements.lock` once the pipeline runs.
