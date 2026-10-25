@@ -150,13 +150,15 @@ def cue_from_reply(window_id: str, word_count: int, quality: float, data: dict |
 
 
 class OllamaCueModel:
-    def __init__(self, model: str, host: str = "http://127.0.0.1:11434", temperature: float = 0.0, timeout_s: float = 120.0):
+    def __init__(self, model: str, host: str = "http://127.0.0.1:11434", temperature: float = 0.0,
+                 timeout_s: float = 120.0, options: dict | None = None):
         import requests
 
         self.model = config.assert_local_ollama_model(model)
         self.host = host.rstrip("/")
         self.temperature = float(temperature)
         self.timeout_s = float(timeout_s)
+        self.options = dict(options or {})
         self._requests = requests
         tags = requests.get(f"{self.host}/api/tags", timeout=10).json()
         names = {m.get("name", "") for m in tags.get("models", [])}
@@ -179,7 +181,7 @@ class OllamaCueModel:
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
             "stream": False,
             "format": "json",
-            "options": {"temperature": self.temperature, "num_predict": 300},
+            "options": {"temperature": self.temperature, "num_predict": 300, **self.options},
             "keep_alive": "10m",
         }
         reply = self._requests.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout_s)

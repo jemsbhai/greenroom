@@ -98,7 +98,7 @@ def profiles_dir() -> Path:
 
 
 def load_profile(name: str) -> dict:
-    """Load profiles/<name>.yaml (rtx4090 or t4)."""
+    """Load profiles/<name>.yaml (rtx4090, t4, or cpu)."""
     path = profiles_dir() / f"{name}.yaml"
     if not path.is_file():
         available = ", ".join(sorted(p.stem for p in profiles_dir().glob("*.yaml")))

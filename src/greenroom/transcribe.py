@@ -22,13 +22,15 @@ def transcript_path(video_id: str) -> Path:
 
 
 class Transcriber:
-    def __init__(self, model_size: str = "large-v3", compute_type: str = "float16", device: str | None = None):
+    def __init__(self, model_size: str = "large-v3", compute_type: str = "float16", device: str | None = None,
+                 cpu_threads: int | None = None):
         from faster_whisper import WhisperModel
 
         self.model_size = model_size
         self.device = device or "cuda"
         self.compute_type = compute_type
-        self.model = WhisperModel(model_size, device=self.device, compute_type=compute_type)
+        options = {"cpu_threads": max(1, int(cpu_threads))} if cpu_threads is not None else {}
+        self.model = WhisperModel(model_size, device=self.device, compute_type=compute_type, **options)
 
     @property
     def model_id(self) -> str:

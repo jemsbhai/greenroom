@@ -40,6 +40,11 @@ STATUS_TEXT = {
     "mixed_activity": "Mixed activity suggested",
     "ai_suggested": "AI suggestion (unverified)",
 }
+PROCESSING_PROFILES = {
+    "cpu": "CPU (no GPU required)",
+    "rtx4090": "RTX 4090 / CUDA",
+    "t4": "T4 / CUDA (no expressions)",
+}
 
 
 @st.cache_data(show_spinner=False)
@@ -54,6 +59,12 @@ def _upload_panel(app_run: int) -> None:
     st.session_state["upload_panel_app_run"] = app_run
     with st.expander("Add videos", expanded=False):
         st.caption("Choose videos to analyze and add to the review list. Uploads and processing stay on this computer.")
+        profile_name = st.selectbox(
+            "Processing profile", list(PROCESSING_PROFILES),
+            format_func=PROCESSING_PROFILES.get, key="upload_processing_profile",
+            help="CPU works without an NVIDIA GPU and uses smaller speech models. Processing may take longer. "
+                 "The selected profile is saved with each new upload; retries keep that profile.",
+        )
         generation = st.session_state.get("upload_generation", 0)
         selected = st.file_uploader(
             "Choose videos",
@@ -67,7 +78,7 @@ def _upload_panel(app_run: int) -> None:
             with st.spinner("Checking and saving videos…"):
                 for uploaded in selected:
                     try:
-                        job = uploads.submit_upload(uploaded)
+                        job = uploads.submit_upload(uploaded, profile_name=profile_name)
                         notices.append(("success", f"{job['original_name']}: added to the processing queue."
                                         if job["status"] == "queued" else f"{job['original_name']}: already {job['status']}."))
                     except Exception as exc:  # noqa: BLE001
@@ -104,6 +115,8 @@ def _upload_panel(app_run: int) -> None:
             visible_jobs += [job for job in jobs if job["status"] == "completed"][:10]
             for job in visible_jobs:
                 st.text(job["original_name"])
+                saved_profile = job.get("profile_name", "rtx4090")
+                st.caption(f"Processing profile: {PROCESSING_PROFILES.get(saved_profile, saved_profile)}")
                 status = job["status"]
                 if status == "completed":
                     st.caption(f"Ready to review · {job['n_windows']} windows")

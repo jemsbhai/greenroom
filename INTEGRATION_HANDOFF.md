@@ -14,9 +14,48 @@ All provided participant media and derived data stay on the authorized local mac
 
 ## Windows setup
 
-Use Python 3.11 or newer. The current development profile targets an NVIDIA CUDA machine with approximately 16 GB of GPU memory; actual requirements depend on the selected stages and other GPU processes. Install a compatible CUDA PyTorch build for the target machine first. `torch` is deliberately not installed by the project extras. Do not replace an existing working CUDA build with a CPU wheel.
+Use Python 3.11 or newer. Choose the CPU setup below for a machine without a GPU. The GPU setup is an alternative for an NVIDIA CUDA machine. `torch` is deliberately not installed by the project extras; install the matching PyTorch build first. Keep CPU and GPU environments separate.
 
 Run these commands from PowerShell, substituting your own repository and data paths. The data directory must be outside the repository. The `$env:` assignment affects this shell and processes started from it; persisting a user environment variable alone does not update an already open shell.
+
+### CPU setup: no GPU or CUDA required
+
+```powershell
+$repo = "D:\projects\greenroom"
+$env:GREENROOM_DATA_DIR = "D:\greenroom-data"
+New-Item -ItemType Directory -Force -Path (Join-Path $env:GREENROOM_DATA_DIR "videos") | Out-Null
+Set-Location $repo
+
+# A fresh environment: do not replace an existing CUDA .venv.
+python -m venv .venv-cpu
+$python = Join-Path $repo ".venv-cpu\Scripts\python.exe"
+& $python -m pip install --upgrade pip
+& $python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+& $python -m pip install -e ".[ml,dev]"
+& $python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+& $python -c "import cv2; print(cv2.__version__, hasattr(cv2, 'CascadeClassifier'))"
+
+# Install Ollama separately; this small local model is used for transcript cues.
+ollama pull qwen2.5:1.5b-instruct
+ollama list
+# If the Ollama desktop service is not running, run `ollama serve`
+# in a separate terminal. Do not start a second server on the same port.
+& $python -m greenroom env
+& $python -m pytest -q
+& $python -m streamlit run app/review_app.py --server.address 127.0.0.1 --server.port 8501
+```
+
+The PyTorch check should show `None` for the CUDA version and `False` for CUDA availability in this CPU-wheel environment. The wheel index above is the official [PyTorch CPU installation source](https://pytorch.org/get-started/previous-versions/). Use `--profile cpu` explicitly for inference commands; the CLI default remains `rtx4090`. In the app, choose **Add videos → Processing profile → CPU** before submitting files. Each queued job retains its chosen profile, including on retry; changing the selector does not change an already queued job.
+
+`profiles/cpu.yaml` forces model inference onto CPU, uses Whisper `small.en` with `int8` compute and Ollama `qwen2.5:1.5b-instruct` with zero GPU layers, disables AST, and uses X-CLIP patch32 with batch size one. It retains CLAP, VideoMAE, and the same face detector and expression classifier. There is no NVML/GPU power sampling for this profile. The smaller English-only speech and transcript models can change results compared with the RTX profile. Full inference can be slow and still needs substantial system RAM; target-machine speed and quality are not benchmarked. Start with a short synthetic clip before a large batch.
+
+CPU validation on the development machine: all 160 tests passed, and a 10-second synthetic video with locally synthesized speech completed all four pipeline stages with `CUDA_VISIBLE_DEVICES=-1` and pre-cached weights. The run produced two timestamped records, transcribed 16 words, parsed the transcript-model response successfully, and reported CPU placement for CLAP, X-CLIP, VideoMAE, and expressions; Ollama reported zero GPU memory use. A separate expression-classifier forward pass also succeeded on CPU. This used Python 3.12.2, the existing PyTorch 2.6.0 CUDA build with CUDA disabled, Transformers 5.1.0, and faster-whisper 1.2.1; it verifies CPU execution, not a fresh CPU-wheel installation or recognition accuracy.
+
+Expression-only processing does not need Ollama: use `tag-expressions --profile cpu` for existing records, or `run --profile cpu --stages expression` to create new expression-only records in a new library. The latter creates records without activity evidence and must not be used to refresh existing activity records. Reviewing or exporting completed records runs no inference models and needs neither a GPU nor Ollama; the base package (`pip install -e ".[dev]"`) is sufficient for that workflow.
+
+### GPU setup: existing CUDA installation
+
+The `rtx4090` development profile targets an NVIDIA CUDA machine with approximately 16 GB of GPU memory; actual requirements depend on the selected stages and other GPU processes. Install a compatible CUDA PyTorch build for the target machine first. Do not replace an existing working CUDA build with a CPU wheel.
 
 ```powershell
 $repo = "D:\projects\greenroom"
@@ -38,7 +77,7 @@ $python = Join-Path $repo ".venv\Scripts\python.exe"
 
 `requirements.lock` is a broad snapshot of the original machine, including unrelated packages and an editable reference to another project. It is not a portable application lockfile. Install from `pyproject.toml` as above. Its dependency lower bounds are not a guarantee that every future dependency combination works; record a tested environment for your target. In particular, retain `opencv-python-headless>=4.8,<5`: the expression detector uses the OpenCV 4 bundled Haar cascade API. A clean environment avoids collisions among multiple OpenCV distributions. If you use a venv without system packages, install the correct CUDA PyTorch build inside it before the ML extra.
 
-Install FFmpeg and ffprobe on PATH and install Ollama separately. `imageio-ffmpeg` provides a bundled FFmpeg fallback; ffprobe is optional, with metadata parsing as the fallback. For the full default pipeline, Ollama must serve the local model at `http://127.0.0.1:11434`:
+For the full GPU pipeline, Ollama must serve the following local model at `http://127.0.0.1:11434`:
 
 ```powershell
 ollama pull qwen2.5:7b-instruct
@@ -50,13 +89,15 @@ ollama list
 & $python -m streamlit run app/review_app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
+For either setup, install FFmpeg and ffprobe on PATH and install Ollama separately when running the transcript stage. `imageio-ffmpeg` provides a bundled FFmpeg fallback; ffprobe is optional, with metadata parsing as the fallback. Reopen a shell with the same `GREENROOM_DATA_DIR` and interpreter when running later commands.
+
 First inference downloads model weights when absent from the local caches. Model download access is different from sending participant data to an inference service: inference remains local. Pre-cache models if the final system must run without network access. The environment check is diagnostic; a successful `env` command does not prove every model or Ollama is ready. Verify with a synthetic full run on the target machine.
 
 `.streamlit/config.toml` binds the app to localhost, sets the upload limit to 2,048 MiB per file, and disables usage telemetry. Launch from the repository root to pick up this configuration. Restart Streamlit after changing server configuration. The app has no user authentication or deployment access-control layer; a teammate adding a network service must design that boundary explicitly before exposing participant data.
 
 ## Running and reviewing
 
-For a new installation, open the sidebar's **Add videos**, select one or more recordings, and click **Add to processing queue**. Review mode and upload mode share the same external data directory. Jobs continue in a separate local process if the browser closes. Failed jobs expose **Retry processing**. The UI accepts MP4, MPEG4, MOV, MKV, AVI, WEBM, and M4V; the backend also checks that the file has a decodable video stream.
+For a new installation, open the sidebar's **Add videos**, select **CPU** under **Processing profile** on a machine without a GPU, select one or more recordings, and click **Add to processing queue**. Use the RTX 4090 choice only with the matching GPU environment and Ollama model. Review mode and upload mode share the same external data directory. Jobs continue in a separate local process if the browser closes. Failed jobs expose **Retry processing**. The UI accepts MP4, MPEG4, MOV, MKV, AVI, WEBM, and M4V; the backend also checks that the file has a decodable video stream.
 
 Select a processed video and set **View** to **Expression timeline** to see tags across the whole video. Each row carries source-relative start/end timestamps, the unverified AI expression, and any separate staff observation. Filter labels, select a timestamped window for playback, and download JSON or CSV. Timeline viewing does not require a reviewer name. **Review clips** requires a reviewer name before recording decisions. Use the Edit form to record a staff expression observation; accepting an activity suggestion alone does not verify its AI expression.
 
@@ -64,7 +105,7 @@ For initial bulk ingestion, copy authorized files into `<data>/videos/`, then bu
 
 ```powershell
 & $python -m greenroom windows --subclips
-& $python -m greenroom run --all --profile rtx4090
+& $python -m greenroom run --all --profile cpu
 
 # IDs come from derived/windows.json, not from a guessed filename conversion.
 $index = Get-Content (Join-Path $env:GREENROOM_DATA_DIR "derived\windows.json") -Raw | ConvertFrom-Json
@@ -72,13 +113,15 @@ $index.videos | Select-Object video_id, source_file, n_windows
 $videoId = $index.videos[0].video_id
 
 # Subsequent expression-only refresh of existing records preserves activity data and staff reviews.
-& $python -m greenroom tag-expressions --video $videoId --profile rtx4090
-# Or: & $python -m greenroom tag-expressions --all --profile rtx4090
+& $python -m greenroom tag-expressions --video $videoId --profile cpu
+# Or: & $python -m greenroom tag-expressions --all --profile cpu
 
 # Run a new silent video without loading audio/transcript models:
-# & $python -m greenroom run --video $videoId --profile rtx4090 --stages vision,expression
+# & $python -m greenroom run --video $videoId --profile cpu --stages vision,expression
 & $python -m greenroom verify
 ```
+
+These bulk commands use the CPU environment's `$python`. Replace `cpu` with `rtx4090` and use the GPU environment's interpreter for CUDA inference. `windows`, review, verification, and exports do not take a processing profile. Uploaded silent clips automatically skip audio/transcript stages; for direct CLI processing of a silent clip, select `--stages vision,expression` as shown above.
 
 `windows` rebuilds the index; it is not incremental intake. Once uploads or reviews exist, use the upload API for additions instead of rebuilding the index. `run` rewrites model records for its selected videos; do not use `run --stages expression` as a refresh of reviewed activity records. Use `tag-expressions` for that purpose. Coordinate all inference writes: upload workers serialize themselves with an OS lock, but unrelated direct CLI pipeline runs and expression refreshes do not share a universal scheduler. Do not run overlapping writers against the same data root/video. `purge` is destructive and is not an integration or refresh step.
 
@@ -116,7 +159,9 @@ Default `rtx4090` configuration:
 
 CLAP's fallback is `laion/clap-htsat-unfused`; the expression fallback is `dima806/facial_emotions_image_detection`. Read the actual `model_id` in the output because a fallback can be selected at load time. The T4 profile substitutes X-CLIP patch32, faster-whisper `distil-large-v3`/`int8_float16`, and Ollama `qwen2.5:3b-instruct`; it disables AST and currently has no enabled expression block. Do not select it expecting expression output without adding a compatible expression configuration and testing it.
 
-DETR (`facebook/detr-resnet-50`) and Qwen2.5-VL entries in the profiles are future configuration, not running stages. SigLIP is unset. PySceneDetect is a dependency but is not used to create the fixed windows. There is no face recognition, cross-frame person tracking, speaker diarization, or emotion-specific language model. Runtime support includes PyTorch/Transformers, faster-whisper/CTranslate2/PyAV/ONNX Runtime, OpenCV/Pillow/NumPy, librosa/SoundFile, FFmpeg, local Ollama/Requests, and Streamlit/pandas/PyYAML; optional NVML measures GPU use.
+The CPU profile substitutes `microsoft/xclip-base-patch32`, faster-whisper `small.en` (`Systran/faster-whisper-small.en`) with `int8`, and Ollama `qwen2.5:1.5b-instruct`. AST is disabled. Its expression settings and output schema match the RTX profile; its configuration and actual model IDs remain visible in run provenance. This is local inference using downloaded model weights, not Hugging Face hosted inference.
+
+DETR (`facebook/detr-resnet-50`) and Qwen2.5-VL entries in the profiles are future configuration, not running stages. SigLIP is unset. Fixed windows are built directly; no scene-detection model is required. There is no face recognition, cross-frame person tracking, speaker diarization, or emotion-specific language model. Runtime support includes PyTorch/Transformers, faster-whisper/CTranslate2/PyAV/ONNX Runtime, OpenCV/Pillow/NumPy, librosa/SoundFile, FFmpeg, local Ollama/Requests, and Streamlit/pandas/PyYAML; optional NVML measures GPU use.
 
 ## Local files and completion boundary
 
@@ -259,7 +304,7 @@ from pathlib import Path
 from greenroom import uploads
 
 with Path("D:/incoming/consenting-adult-demo.mp4").open("rb") as video:
-    job = uploads.submit_upload(video, profile_name="rtx4090")
+    job = uploads.submit_upload(video, profile_name="cpu")
 uploads.start_worker()  # Uses this interpreter, environment, and data directory.
 print(job["job_id"], job["video_id"])
 
@@ -271,6 +316,8 @@ status = job_by_id[job["job_id"]]["status"]
 ```
 
 `submit_upload` requires a seekable binary file-like object with a `name`, and accepts an optional `max_bytes`. The backend defaults to 2,048 MiB, assigns a collision-resistant source filename/video ID, and deduplicates identical file bytes with the same profile. A repeated submission may return an already completed or failed job, so inspect its status. Retry explicitly; do not create a new job by renaming an unchanged file. `python -m greenroom.uploads` drains pending jobs synchronously, and `uploads.process_queue()` is the equivalent Python entry point. The worker automatically uses only `vision,expression` for silent clips. It refuses to overwrite an upload that already has staff reviews.
+
+Pass `profile_name="cpu"` explicitly in a CPU integration; omitting it keeps the API's RTX profile default. Start the worker with the same `.venv-cpu` interpreter and environment used for submission. For a GPU integration, use `profile_name="rtx4090"` and the corresponding environment. Profile selection is saved in job state and is part of the deduplication key.
 
 The current app plays a selected window as a subclip: its player clock starts at zero, and the caption shows the interval in the original video. It does not automatically synchronize an expression overlay while a full video plays. If the receiving UI plays the original source, use its player seek API with the row's `start_s`. If it plays a generated subclip starting at that timestamp, map player time back with `source_time = clip_start_s + player_current_time`; show the original interval in the label. Keep separate visual columns/badges for **AI expression (unverified)** and **Staff observation**. Do not infer that a reviewed activity makes an expression verified.
 
@@ -288,4 +335,4 @@ Before handing an adapter to another teammate:
 6. Re-submit the same file/profile and check job deduplication. Exercise a failed job/retry. Existing video IDs, windows, reviews, and active review selection must survive unrelated uploads.
 7. Refresh expressions with `tag-expressions`; verify activities and the ledger remain unchanged. Re-import by stable keys and update model provenance. Check that no private artifacts entered Git or remote logs.
 
-Known limits: the model samples faces rather than tracking each frame, frontal-face detection misses profiles/occlusions/small faces, predictions vary with lighting and performance context, no continuous emotion onset/offset is inferred, and a timestamp tag covers its whole analysis window. The default expression settings are 1 fps at 540-pixel height, at most five frames per window, a 40-pixel minimum face size, and at least two face readings. They are configurable in `profiles/rtx4090.yaml`. There is no live progress percentage, distributed worker queue, authentication, or stable person identity contract. Integrate those concerns as separate explicit features rather than assuming they already exist.
+Known limits: the model samples faces rather than tracking each frame, frontal-face detection misses profiles/occlusions/small faces, predictions vary with lighting and performance context, no continuous emotion onset/offset is inferred, and a timestamp tag covers its whole analysis window. The default expression settings are 1 fps at 540-pixel height, at most five frames per window, a 40-pixel minimum face size, and at least two face readings. They are configurable in `profiles/cpu.yaml` and `profiles/rtx4090.yaml`. There is no live progress percentage, distributed worker queue, authentication, or stable person identity contract. Integrate those concerns as separate explicit features rather than assuming they already exist.

@@ -50,13 +50,14 @@ def upload_ui(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(uploads, "list_jobs", lambda: [dict(job) for job in state.jobs])
 
-    def submit(upload):
+    def submit(upload, *, profile_name):
         state.events.append(("submit", upload.name))
         if upload.name == "broken.mp4":
             raise ValueError("Video has no decodable frames")
         job = {
             "job_id": f"job-{len(state.jobs)}", "video_id": Path(upload.name).stem,
             "original_name": upload.name, "status": "queued", "n_windows": 0, "error": None,
+            "profile_name": profile_name,
         }
         state.jobs.append(job)
         return job
@@ -125,7 +126,8 @@ def test_upload_controls_available_before_review_can_start(upload_ui, initial_st
     assert "Add videos" in [item.label for item in app.sidebar.expander]
     assert _element(app.sidebar.button, "Add to processing queue").disabled
     assert _element(app.sidebar.text_input, "Reviewer name").value == ""
-    assert not app.sidebar.selectbox
+    assert [item.label for item in app.sidebar.selectbox] == ["Processing profile"]
+    assert _element(app.sidebar.selectbox, "Processing profile").value == "cpu"
     upload_ui.start.assert_not_called()
 
 
@@ -137,7 +139,10 @@ def test_multiple_uploads_enqueue_successes_despite_one_invalid_file(upload_ui):
     _element(app.sidebar.button, "Add to processing queue").click().run()
     _healthy(app)
     assert [call.args[0] for call in upload_ui.submit.call_args_list] == files
+    assert all(call.kwargs == {"profile_name": "cpu"} for call in upload_ui.submit.call_args_list)
     assert [job["original_name"] for job in upload_ui.jobs] == ["first.mp4", "second.mov"]
+    assert [job["profile_name"] for job in upload_ui.jobs] == ["cpu", "cpu"]
+    assert sum(item.value == "Processing profile: CPU (no GPU required)" for item in app.caption) == 2
     assert any("first.mp4: added to the processing queue" in item.value for item in app.success)
     assert any("second.mov: added to the processing queue" in item.value for item in app.success)
     assert any("broken.mp4: Video has no decodable frames" in item.value for item in app.error)
@@ -148,6 +153,49 @@ def test_multiple_uploads_enqueue_successes_despite_one_invalid_file(upload_ui):
     app.run()
     _healthy(app)
     assert _element(app.sidebar.button, "Add to processing queue").disabled
+
+
+def test_selected_upload_profile_reaches_queue_and_survives_reruns(upload_ui):
+    upload_ui.selected = [SimpleNamespace(name="gpu-video.mp4")]
+    app = upload_ui.app()
+    profiles = _element(app.sidebar.selectbox, "Processing profile")
+    assert profiles.options == ["CPU (no GPU required)", "RTX 4090 / CUDA", "T4 / CUDA (no expressions)"]
+    profiles.select("rtx4090").run()
+    _healthy(app)
+    _element(app.sidebar.button, "Add to processing queue").click().run()
+    _healthy(app)
+    upload_ui.submit.assert_called_once_with(upload_ui.selected[0], profile_name="rtx4090")
+    assert upload_ui.jobs[0]["profile_name"] == "rtx4090"
+    assert _element(app.sidebar.selectbox, "Processing profile").value == "rtx4090"
+    # Clearing the file uploader and refreshing the app must retain this choice.
+    app.run()
+    _healthy(app)
+    assert _element(app.sidebar.button, "Add to processing queue").disabled
+    assert _element(app.sidebar.selectbox, "Processing profile").value == "rtx4090"
+    assert any(item.value == "Processing profile: RTX 4090 / CUDA" for item in app.caption)
+
+
+def test_completed_upload_preserves_profile_and_existing_records(upload_ui):
+    index_path = upload_ui.write_index(["existing"])
+    original_index = index_path.read_bytes()
+    records_path = index_path.parent.parent / "records" / "existing" / "records.jsonld"
+    original_records = records_path.read_bytes()
+    upload_ui.jobs.append({
+        "job_id": "completed-upload", "video_id": "uploaded", "original_name": "uploaded.mp4",
+        "status": "running", "n_windows": 0, "error": None, "profile_name": "cpu",
+    })
+    app = upload_ui.app()
+    _element(app.sidebar.selectbox, "Processing profile").select("t4").run()
+    _element(app.text_input, "Reviewer name").set_value("Synthetic Reviewer").run()
+    upload_ui.jobs[0].update(status="completed", n_windows=1)
+    app.run()
+    _healthy(app)
+    assert _element(app.sidebar.selectbox, "Processing profile").value == "t4"
+    assert upload_ui.jobs[0]["profile_name"] == "cpu"
+    assert any(item.value == "Processing profile: CPU (no GPU required)" for item in app.caption)
+    assert index_path.read_bytes() == original_index
+    assert records_path.read_bytes() == original_records
+    upload_ui.submit.assert_not_called()
 
 
 def test_completed_upload_refreshes_cached_index_and_video_choices(upload_ui):
@@ -197,16 +245,21 @@ def test_retry_requeues_job_before_starting_worker(upload_ui):
     upload_ui.jobs.append({
         "job_id": "failed-job", "video_id": "failed-video", "original_name": "failed-video.mp4",
         "status": "failed", "n_windows": 0, "error": "Synthetic processing failure",
+        "profile_name": "rtx4090",
     })
     app = upload_ui.app()
     _healthy(app)
     upload_ui.start.assert_not_called()
+    assert _element(app.sidebar.selectbox, "Processing profile").value == "cpu"
+    assert any(item.value == "Processing profile: RTX 4090 / CUDA" for item in app.caption)
     _element(app.sidebar.button, "Retry processing").click().run()
     _healthy(app)
     upload_ui.retry.assert_called_once_with("failed-job")
     upload_ui.start.assert_called_once()
     assert upload_ui.events == [("retry", "failed-job"), ("start", None)]
     assert upload_ui.jobs[0]["status"] == "queued"
+    assert upload_ui.jobs[0]["profile_name"] == "rtx4090"
+    upload_ui.submit.assert_not_called()
     app.run()
     _healthy(app)
     assert any(item.value == "Queued for processing" for item in app.caption)

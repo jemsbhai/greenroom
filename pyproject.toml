@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Installed in Phase 1. torch is expected from the system site-packages (CUDA build already present).
+# Install the appropriate CPU or CUDA torch build before these ML dependencies.
 ml = [
     "transformers>=4.45",
     "accelerate>=0.30",
@@ -27,7 +27,6 @@ ml = [
     "pillow>=10",
     "soundfile>=0.12",
     "librosa>=0.10",
-    "scenedetect[opencv]>=0.6",
     "sentencepiece",
     "requests>=2.31",
 ]

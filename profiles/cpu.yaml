@@ -1,0 +1,88 @@
+# Local processing on a machine without a GPU. Smaller models and batches
+# trade throughput and some model capacity for lower memory use.
+name: cpu
+device: cpu
+cpu_threads: 4
+window_seconds: 5
+
+asr:
+  backend: faster-whisper
+  model: small.en
+  compute_type: int8
+  cpu_threads: 4
+  vad_filter: true
+  no_speech_threshold: 0.6
+  language: en
+
+audio_events:
+  clap_model: laion/larger_clap_music_and_speech
+  clap_fallback_model: laion/clap-htsat-unfused
+  ast_model: null
+  batch_size: 1
+  analysis_window_seconds: 10
+  hop_seconds: 5
+
+vision:
+  xclip_model: microsoft/xclip-base-patch32
+  videomae_model: MCG-NJU/videomae-base-finetuned-kinetics
+  sample_fps: 4.0
+  frame_height: 224
+  batch_size: 1
+  dark_luminance: 12
+  full_quality_luminance: 50
+
+expression:
+  enabled: true
+  model: trpakov/vit-face-expression
+  fallback_model: dima806/facial_emotions_image_detection
+  sample_fps: 1.0
+  frame_height: 540
+  max_frames_per_window: 5
+  batch_faces: 4
+  min_face_px: 40
+  min_face_readings: 2
+
+transcript_llm:
+  backend: ollama
+  model: qwen2.5:1.5b-instruct
+  context_pad_seconds: 20
+  temperature: 0.0
+  think: false
+  timeout_s: 600
+  options:
+    num_gpu: 0
+    num_thread: 4
+
+fusion:
+  prior_weight: 2.0
+  base_rate_default: 0.1
+  channels:
+    audio:
+      pos: 10.0
+      neg: 4.0
+      score_mode: relative_top
+      competitors: 7
+    xclip:
+      pos: 10.0
+      neg: 4.0
+      score_mode: relative_top
+      competitors: 15
+    videomae:
+      pos: 10.0
+      neg: 1.5
+      score_mode: raw
+      competitors: 400
+    transcript:
+      pos: 5.0
+      neg: 2.0
+      score_mode: raw
+      competitors: 2
+  thresholds:
+    secondary_min_projected: 0.35
+    review_required_uncertainty: 0.5
+    review_required_conflict: 0.4
+    review_required_min_projected: 0.5
+    mixed_activity_margin: 0.1
+
+energy:
+  nvml: false

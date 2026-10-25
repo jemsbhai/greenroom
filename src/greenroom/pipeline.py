@@ -111,6 +111,11 @@ def _load_models(profile: dict, stages: tuple[str, ...], want_gpu: bool, log) ->
     """Load every model the requested stages need, once per run."""
     models: dict = {}
     device = profile.get("device")
+    want_gpu = want_gpu and device != "cpu"
+    if device == "cpu" and profile.get("cpu_threads"):
+        import torch
+
+        torch.set_num_threads(max(1, int(profile["cpu_threads"])))
     if "audio" in stages:
         from .audio_events import AudioEventScorer
 
@@ -150,17 +155,26 @@ def _load_models(profile: dict, stages: tuple[str, ...], want_gpu: bool, log) ->
         from .transcript_cues import OllamaCueModel
 
         asr = profile.get("asr") or {}
+        asr_options = {"cpu_threads": int(asr["cpu_threads"])} if "cpu_threads" in asr else {}
         with StageMeter("load_asr", gpu=want_gpu) as m:
             models["asr"] = Transcriber(
-                asr.get("model", "large-v3"), asr.get("compute_type", "float16"), device="cuda" if device == "cuda" else device
+                asr.get("model", "large-v3"), asr.get("compute_type", "float16"), device=device, **asr_options
             )
         log(f"asr {models['asr'].model_id} ({m.wall_seconds:.1f} s)")
         llm = profile.get("transcript_llm") or {}
+        cue_options = {}
+        if llm.get("options") or device == "cpu":
+            cue_options["options"] = dict(llm.get("options") or {})
+            if device == "cpu":
+                cue_options["options"]["num_gpu"] = 0
+        if "timeout_s" in llm:
+            cue_options["timeout_s"] = float(llm["timeout_s"])
         with StageMeter("load_cue_model", gpu=False) as m:
             models["cues"] = OllamaCueModel(
                 llm.get("model", "qwen2.5:7b-instruct"),
                 host=llm.get("host", "http://127.0.0.1:11434"),
                 temperature=float(llm.get("temperature", 0.0)),
+                **cue_options,
             )
         log(f"transcript cues via {models['cues'].model_id}, local only ({m.wall_seconds:.1f} s)")
     if "expression" in stages:
@@ -186,8 +200,9 @@ def _score_expressions(video_id, source, windows, model, cfg, want_gpu, frames_d
         "sample_frames_expression": {**m_frames.to_dict(), "n_frames": len(paths), "sample_fps": fps}
     }
     with StageMeter("expression", gpu=want_gpu) as m_expr:
+        batch_options = {"batch_faces": int(cfg["batch_faces"])} if "batch_faces" in cfg else {}
         scores, meta = model.score_windows(
-            frames_dir, fps, windows, max_frames_per_window=int(cfg.get("max_frames_per_window", 5))
+            frames_dir, fps, windows, max_frames_per_window=int(cfg.get("max_frames_per_window", 5)), **batch_options
         )
     ids = [s.window_id for s in scores]
     if len(ids) != len(set(ids)) or set(ids) != {w["window_id"] for w in windows}:
@@ -197,7 +212,8 @@ def _score_expressions(video_id, source, windows, model, cfg, want_gpu, frames_d
         **m_expr.to_dict(), **meta,
         "windows_with_suggestion": sum(s is not None for s in suggestions.values()),
     }
-    _release_gpu()
+    if getattr(model, "device", None) != "cpu":
+        _release_gpu()
     return suggestions, stage_meta, [s.to_dict() for s in scores]
 
 
@@ -259,7 +275,7 @@ def tag_expressions(video_ids: list[str], profile: dict, index: dict | None = No
 
     if not prepared:
         return []
-    want_gpu = bool((profile.get("energy") or {}).get("nvml", True))
+    want_gpu = profile.get("device") != "cpu" and bool((profile.get("energy") or {}).get("nvml", True))
     model = _load_models(profile, ("expression",), want_gpu, log)["expression"]
     summaries = []
     for video_id, source, windows, out_dir, originals, document, csv_fields, csv_rows, run_meta in prepared:
@@ -330,9 +346,11 @@ def run_videos(
     settings = channel_settings(profile)
     prior_weight = float((profile.get("fusion") or {}).get("prior_weight", 2.0))
     thresholds = Thresholds.from_profile(profile)
-    want_gpu = bool((profile.get("energy") or {}).get("nvml", True))
+    use_cuda = profile.get("device") != "cpu"
+    want_gpu = use_cuda and bool((profile.get("energy") or {}).get("nvml", True))
     audio_cfg = profile.get("audio_events") or {}
     vision_cfg = profile.get("vision") or {}
+    audio_batch = {"batch_size": int(audio_cfg["batch_size"])} if "batch_size" in audio_cfg else {}
 
     models = _load_models(profile, stages, want_gpu, log)
     summaries: list[dict] = []
@@ -354,7 +372,7 @@ def run_videos(
             stage_meta["extract_audio"] = m_wav.to_dict()
             with StageMeter("audio_events", gpu=want_gpu) as m_audio:
                 scores, meta = models["audio"].score_windows(
-                    wav, windows, analysis_s=float(audio_cfg.get("analysis_window_seconds", 10.0))
+                    wav, windows, analysis_s=float(audio_cfg.get("analysis_window_seconds", 10.0)), **audio_batch
                 )
             stage_meta["audio_events"] = {**m_audio.to_dict(), **meta}
             model_ids.append(models["audio"].model_id)
@@ -364,12 +382,13 @@ def run_videos(
                     s.label_scores, s.quality, s_audio, rates, prior_weight, top_score=max(s.class_probs.values(), default=0.0)
                 )
             channel_outputs["audio"] = [s.to_dict() for s in scores]
-            _release_gpu()
+            if use_cuda:
+                _release_gpu()
 
         if "ast" in models:
             with StageMeter("ast", gpu=want_gpu) as m_ast:
                 scores, meta = models["ast"].score_windows(
-                    wav, windows, analysis_s=float(audio_cfg.get("analysis_window_seconds", 10.0))
+                    wav, windows, analysis_s=float(audio_cfg.get("analysis_window_seconds", 10.0)), **audio_batch
                 )
             stage_meta["ast"] = {**m_ast.to_dict(), **meta}
             model_ids.append(models["ast"].model_id)
@@ -378,13 +397,17 @@ def run_videos(
                 per_window[s.window_id]["ast"] = scores_to_opinions(s.label_scores, s.quality, s_ast, rates, prior_weight)
             channel_outputs["ast"] = [s.to_dict() for s in scores]
             extra_meta["audioset_to_taxonomy"] = models["ast"].resolved_mapping()
-            _release_gpu()
+            if use_cuda:
+                _release_gpu()
 
         if "xclip" in models or "videomae" in models:
             sample_fps = float(vision_cfg.get("sample_fps", 4.0))
+            frame_height = int(vision_cfg.get("frame_height", 256))
             with StageMeter("sample_frames", gpu=False) as m_frames:
-                frames_dir = config.frames_dir() / video_id
-                frame_paths = sample_frames(source, frames_dir, fps=sample_fps, height=int(vision_cfg.get("frame_height", 256)))
+                # A CPU run must not reuse the GPU profile's differently sampled frames.
+                frame_key = video_id if use_cuda else f"{video_id}_cpu_{sample_fps:g}fps_{frame_height}px"
+                frames_dir = config.frames_dir() / frame_key
+                frame_paths = sample_frames(source, frames_dir, fps=sample_fps, height=frame_height)
             stage_meta["sample_frames"] = {**m_frames.to_dict(), "n_frames": len(frame_paths), "sample_fps": sample_fps}
             for channel in ("xclip", "videomae"):
                 if channel not in models:
@@ -407,7 +430,8 @@ def run_videos(
                 channel_outputs[channel] = [s.to_dict() for s in scores]
                 if channel == "videomae":
                     extra_meta["kinetics_to_taxonomy"] = scorer.resolved_mapping()
-                _release_gpu()
+                if use_cuda:
+                    _release_gpu()
 
         cue_by_window: dict[str, dict] = {}
         if "asr" in models and "cues" in models:
@@ -429,7 +453,8 @@ def run_videos(
                 "words": sum(len(s.get("words", [])) for s in transcript.get("segments", [])),
             }
             model_ids.append(models["asr"].model_id)
-            _release_gpu()
+            if use_cuda:
+                _release_gpu()
             with StageMeter("transcript_cues", gpu=want_gpu) as m_cue:
                 cues, meta = score_cues(
                     models["cues"],

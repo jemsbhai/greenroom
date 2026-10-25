@@ -133,7 +133,7 @@ def timeline_ui(tmp_path, monkeypatch):
 def test_timeline_available_without_reviewer_and_keeps_labels_separate(timeline_ui):
     app = timeline_ui.app
     assert _element(app.sidebar.radio, "View").value == "Review clips"
-    assert not app.sidebar.selectbox
+    assert not any(item.label == "Video" for item in app.sidebar.selectbox)
     _open_timeline(app)
     assert _element(app.sidebar.text_input, "Reviewer name").value == ""
     assert _element(app.sidebar.selectbox, "Video").value == "synthetic-a"
