@@ -4,6 +4,7 @@
     python -m greenroom windows [--subclips] build the window index (and review subclips)
     python -m greenroom gold-app            print the command that starts the gold labeling app
     python -m greenroom run ...             run the pipeline on one or more videos
+    python -m greenroom tag-expressions ... refresh expressions while preserving existing activity and review data
     python -m greenroom review-app          print the command that starts the staff review app
     python -m greenroom verify              check the hash chain of every review ledger
     python -m greenroom report              write <data>/records/report.md and report.json (results numbers)
@@ -136,6 +137,20 @@ def cmd_review_app(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tag_expressions(args: argparse.Namespace) -> int:
+    from .pipeline import tag_expressions
+
+    try:
+        profile = config.load_profile(args.profile)
+        index = load_index(config.windows_index_path())
+        video_ids = [v["video_id"] for v in index["videos"]] if args.all else list(args.video or [])
+        tag_expressions(video_ids, profile, index=index)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    return 0
+
+
 def cmd_verify(_: argparse.Namespace) -> int:
     from .ledger import verify_all
 
@@ -206,6 +221,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--stages", default=None, help="comma-separated stages; default: all available")
     p_run.add_argument("--fusion", default="cumulative", choices=["cumulative", "mean", "max"])
     p_run.set_defaults(func=cmd_run)
+
+    p_expr = sub.add_parser("tag-expressions", help="refresh expressions on existing records, preserving activity and review data")
+    p_expr.add_argument("--profile", default="rtx4090", help="profiles/<name>.yaml")
+    selection = p_expr.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--video", action="append", help="video id from the window index (repeatable)")
+    selection.add_argument("--all", action="store_true", help="every video in the index")
+    p_expr.set_defaults(func=cmd_tag_expressions)
 
     p_review = sub.add_parser("review-app", help="print the command that starts the staff review app")
     p_review.set_defaults(func=cmd_review_app)

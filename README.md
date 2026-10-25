@@ -44,6 +44,9 @@ python -m pip install -e ".[ml]"
 python -m greenroom run --video this-is-me-songwriting-camp2-reese
 python -m greenroom run --all --profile rtx4090
 
+# refresh only expression suggestions in existing records; preserve activities and reviews
+python -m greenroom tag-expressions --all --profile rtx4090
+
 # staff review app (accept, edit, reject, defer; hash-chained ledger) and ledger check
 python -m streamlit run app/review_app.py --server.address 127.0.0.1
 python -m greenroom verify
@@ -51,7 +54,9 @@ python -m greenroom verify
 
 The `ml` extra (`python -m pip install -e ".[ml]"`) installs the model dependencies for the pipeline stages; `torch` is expected to be installed already (CUDA build). The project virtual environment reuses that installation. OpenCV is constrained to 4.x because the expression stage uses its bundled Haar `CascadeClassifier`; the base OpenCV 5 wheel no longer provides that API. If activation is unavailable, use `.\.venv\Scripts\python.exe` in place of `python`.
 
-The RTX 4090 profile enables local expression suggestions. They are stored separately from activity evidence, remain unverified, and are hidden in the review app until staff turn on **Show unverified AI expression suggestion**. Staff observations still require the Edit form.
+The RTX 4090 profile enables local expression suggestions. They are stored separately from activity evidence, remain unverified, and are hidden in the review app until staff turn on **Show unverified AI expression suggestion** in the sidebar. This control stays available even when a window has no suggestion, and stays on while browsing windows and videos. The sidebar reports how many windows have suggestions; a window without one shows an explanation. The default **Everything** queue includes all activity statuses. Staff observations still require the Edit form.
+
+Use `python -m greenroom tag-expressions --all` to refresh expressions for videos that already have pipeline records, or replace `--all` with `--video <id>`. This preserves activity predictions, speech, staff reviews and activity provenance. The refresh records its own model, configuration and time in each video's run metadata. Videos without records must first be processed with `python -m greenroom run --video <id>`.
 
 ## Repository layout
 

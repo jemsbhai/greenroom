@@ -143,10 +143,18 @@ def main() -> None:
     windows = {w["window_id"]: w for w in windows_for_video(index, video_id)}
     decided = ledger.latest_decisions(video_id)
 
-    queue_name = st.sidebar.radio("Queue", list(QUEUES), index=0)
+    queue_name = st.sidebar.radio("Queue", list(QUEUES), index=list(QUEUES).index("Everything"))
     pending_only = st.sidebar.toggle("Pending only", value=True)
     search = st.sidebar.text_input("Filter by label or reason", value="").strip().lower()
     context = st.sidebar.toggle(f"Play with {CONTEXT_PAD_S:g} s of context", value=False)
+    show_expression = st.sidebar.toggle(
+        "Show unverified AI expression suggestion",
+        value=False,
+        key="show_expression_suggestions",
+        help="Keep expression suggestions visible while browsing windows and videos. These are unverified model outputs.",
+    )
+    expression_count = sum(bool(r.get("expression_suggestion")) for r in records)
+    st.sidebar.caption(f"Expression suggestions available: {expression_count}/{len(records)} windows.")
 
     statuses = QUEUES[queue_name]
     queue = [r for r in records if statuses is None or r["review_status"] in statuses]
@@ -216,6 +224,19 @@ def main() -> None:
             st.video(_subclip(window, video["source_file"], context))
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not cut the clip: {exc}")
+        if show_expression:
+            suggestion = record.get("expression_suggestion")
+            if suggestion:
+                st.warning(
+                    f"{suggestion['label']} (share {suggestion.get('share', 0):.2f}, "
+                    f"{suggestion.get('face_readings', 0)} face readings). Unverified model output, "
+                    "not a statement about how anyone feels. Use the Edit form to record a staff observation."
+                )
+            else:
+                st.info(
+                    "No expression suggestion is available for this window. "
+                    "Tagging must have run and found enough usable face readings to produce a suggestion."
+                )
         st.markdown(f"**{STATUS_TEXT.get(record['review_status'], record['review_status'])}**")
         st.markdown(
             f"Suggested primary: **{_name(record['primary_activity'])}**  (P = {record['confidence']:.2f}, "
@@ -233,13 +254,6 @@ def main() -> None:
                 f"Speech: {speech.get('speech_kind', 'unclear')} ({speech.get('word_count', 0)} words); "
                 f"facilitation: {'yes' if flag else 'no' if flag is False else 'unclear'} "
                 f"(confidence {speech.get('facilitation_confidence', 0.0):.2f}). {speech.get('rationale', '')}"
-            )
-        suggestion = record.get("expression_suggestion")
-        if suggestion and st.toggle("Show unverified AI expression suggestion", value=False, key=f"expr_{record['window_id']}"):
-            st.warning(
-                f"{suggestion['label']} (share {suggestion.get('share', 0):.2f}, "
-                f"{suggestion.get('face_readings', 0)} face readings). Unverified model output, "
-                "not a statement about how anyone feels. Use the Edit form to record a staff observation."
             )
         with st.expander("Evidence behind the suggestion"):
             st.caption("Fused opinions, top labels")

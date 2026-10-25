@@ -8,8 +8,12 @@ Stages run one after another and the GPU is released between them.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import config
 from . import taxonomy as T
@@ -172,6 +176,142 @@ def _load_models(profile: dict, stages: tuple[str, ...], want_gpu: bool, log) ->
     return models
 
 
+def _score_expressions(video_id, source, windows, model, cfg, want_gpu, frames_dir=None):
+    """Shared expression stage; returns suggestions, measurements and aggregate readings."""
+    fps = float(cfg.get("sample_fps", 1.0))
+    with StageMeter("sample_frames_expression", gpu=False) as m_frames:
+        frames_dir = frames_dir or config.frames_dir() / f"{video_id}_expr"
+        paths = sample_frames(source, frames_dir, fps=fps, height=int(cfg.get("frame_height", 540)))
+    stage_meta = {
+        "sample_frames_expression": {**m_frames.to_dict(), "n_frames": len(paths), "sample_fps": fps}
+    }
+    with StageMeter("expression", gpu=want_gpu) as m_expr:
+        scores, meta = model.score_windows(
+            frames_dir, fps, windows, max_frames_per_window=int(cfg.get("max_frames_per_window", 5))
+        )
+    ids = [s.window_id for s in scores]
+    if len(ids) != len(set(ids)) or set(ids) != {w["window_id"] for w in windows}:
+        raise ValueError(f"{video_id}: expression scorer returned missing, duplicate or unexpected window IDs")
+    suggestions = {s.window_id: s.suggestion(model.model_id, int(cfg.get("min_face_readings", 2))) for s in scores}
+    stage_meta["expression"] = {
+        **m_expr.to_dict(), **meta,
+        "windows_with_suggestion": sum(s is not None for s in suggestions.values()),
+    }
+    _release_gpu()
+    return suggestions, stage_meta, [s.to_dict() for s in scores]
+
+
+def _validate_expression_records(rows, windows, video_id, kind):
+    """Reject stale or incomplete exports before any expression refresh is written."""
+    expected = {w["window_id"]: w for w in windows}
+    ids = [row.get("window_id") for row in rows]
+    if not windows or len(expected) != len(windows) or len(ids) != len(set(ids)) or set(ids) != set(expected):
+        raise ValueError(f"{kind} has missing, duplicate or unexpected window IDs")
+    for row in rows:
+        window = expected[row["window_id"]]
+        if row.get("video_id") != video_id or any(
+            float(row.get(key, "nan")) != float(window[key]) for key in ("start_s", "end_s")
+        ):
+            raise ValueError(f"{kind} timestamp/video mismatch for {row['window_id']}")
+
+
+def tag_expressions(video_ids: list[str], profile: dict, index: dict | None = None, log=print) -> list[dict]:
+    """Refresh expression suggestions on existing records, preserving activity and review data.
+
+    All selected exports are validated before loading models. Full frames are sampled
+    into a fresh temporary directory so a changed FPS or height cannot reuse a stale
+    frame cache. Face crops remain in memory inside ExpressionTagger.
+    """
+    cfg = profile.get("expression") or {}
+    if not cfg.get("enabled", False) or not cfg.get("model"):
+        raise ValueError("The selected profile must enable expression and configure an expression model")
+    index = index if index is not None else load_index(config.windows_index_path())
+    by_id = {v["video_id"]: v for v in index["videos"]}
+    video_ids = list(dict.fromkeys(video_ids))
+    unknown = [v for v in video_ids if v not in by_id]
+    if unknown:
+        raise ValueError(f"unknown video id(s): {unknown}; known: {sorted(by_id)}")
+    prepared = []
+    for video_id in video_ids:
+        out_dir = config.records_dir() / video_id
+        windows = windows_for_video(index, video_id)
+        try:
+            originals = {name: (out_dir / name).read_bytes() for name in ("records.jsonld", "records.csv", "run_meta.json")}
+            document = json.loads(originals["records.jsonld"])
+            records = document["@graph"]
+            csv_reader = csv.DictReader(io.StringIO(originals["records.csv"].decode("utf-8-sig"), newline=""))
+            csv_rows = list(csv_reader)
+            csv_fields = list(csv_reader.fieldnames or [])
+            run_meta = json.loads(originals["run_meta.json"])
+            _validate_expression_records(records, windows, video_id, "JSON-LD")
+            _validate_expression_records(csv_rows, windows, video_id, "CSV")
+            if run_meta.get("video_id") != video_id:
+                raise ValueError("run_meta video ID does not match")
+            source = config.videos_dir() / by_id[video_id]["source_file"]
+            if not source.is_file():
+                raise FileNotFoundError(f"source video is missing: {source}")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError(
+                f"Cannot refresh expressions for {video_id}: {exc}. "
+                f"Restore matching exports or run: python -m greenroom run --video {video_id} --profile {profile.get('name', 'rtx4090')}"
+            ) from exc
+        prepared.append((video_id, source, windows, out_dir, originals, document, csv_fields, csv_rows, run_meta))
+
+    if not prepared:
+        return []
+    want_gpu = bool((profile.get("energy") or {}).get("nvml", True))
+    model = _load_models(profile, ("expression",), want_gpu, log)["expression"]
+    summaries = []
+    for video_id, source, windows, out_dir, originals, document, csv_fields, csv_rows, run_meta in prepared:
+        log(f"{video_id}: tagging expressions in {len(windows)} existing windows ...")
+        with tempfile.TemporaryDirectory(prefix=f"{video_id}_expr_", dir=config.frames_dir()) as temp_dir:
+            suggestions, stage_meta, outputs = _score_expressions(
+                video_id, source, windows, model, cfg, want_gpu, frames_dir=Path(temp_dir)
+            )
+        for record in document["@graph"]:
+            record["expression_suggestion"] = suggestions[record["window_id"]]
+        if "expression_suggestion" not in csv_fields:
+            csv_fields.append("expression_suggestion")
+        for row in csv_rows:
+            row["expression_suggestion"] = (suggestions[row["window_id"]] or {}).get("label", "")
+        refresh = {
+            "operation": "expression_refresh",
+            "video_id": video_id,
+            "n_windows": len(windows),
+            "provenance": provenance(profile, [model.model_id], ["expression"]),
+            "expression_config": dict(cfg),
+            "stage_meta": stage_meta,
+            "processing_wall_seconds": round(sum(m["wall_seconds"] for m in stage_meta.values()), 3),
+            "windows_with_suggestion": sum(s is not None for s in suggestions.values()),
+        }
+        # Existing provenance and run totals still describe the original activity run.
+        run_meta["expression_refresh"] = refresh
+        run_meta.setdefault("stage_meta", {}).update(stage_meta)
+        run_meta.setdefault("channel_outputs", {})["expression"] = outputs
+        csv_text = io.StringIO(newline="")
+        writer = csv.DictWriter(csv_text, fieldnames=csv_fields)
+        writer.writeheader()
+        writer.writerows(csv_rows)
+        updates = {
+            "records.jsonld": json.dumps(document, indent=2),
+            "records.csv": csv_text.getvalue(),
+            "run_meta.json": json.dumps(run_meta, indent=2),
+        }
+        # Prepare every replacement first; avoid truncated files and overwriting a
+        # concurrent pipeline run. Segments and review ledgers are never opened here.
+        with tempfile.TemporaryDirectory(prefix=".expression-refresh-", dir=out_dir) as temp_dir:
+            for name, content in updates.items():
+                (Path(temp_dir) / name).write_text(content, encoding="utf-8", newline="")
+            for name, original in originals.items():
+                if (out_dir / name).read_bytes() != original:
+                    raise RuntimeError(f"{out_dir / name} changed during expression tagging; retry after the other writer finishes")
+            for name in updates:
+                (Path(temp_dir) / name).replace(out_dir / name)
+        log(f"  {refresh['windows_with_suggestion']}/{len(windows)} windows with suggestions; activity and staff review data preserved")
+        summaries.append(refresh)
+    return summaries
+
+
 def run_videos(
     video_ids: list[str],
     profile: dict,
@@ -310,27 +450,11 @@ def run_videos(
 
         expression_by_window: dict[str, dict | None] = {}
         if "expression" in models:
-            cfg = profile.get("expression") or {}
-            fps = float(cfg.get("sample_fps", 1.0))
-            with StageMeter("sample_frames_expression", gpu=False) as m_hi:
-                hi_dir = config.frames_dir() / f"{video_id}_expr"
-                hi_paths = sample_frames(source, hi_dir, fps=fps, height=int(cfg.get("frame_height", 540)))
-            stage_meta["sample_frames_expression"] = {**m_hi.to_dict(), "n_frames": len(hi_paths), "sample_fps": fps}
-            with StageMeter("expression", gpu=want_gpu) as m_expr:
-                expr_scores, meta = models["expression"].score_windows(
-                    hi_dir, fps, windows, max_frames_per_window=int(cfg.get("max_frames_per_window", 5))
-                )
-            stage_meta["expression"] = {**m_expr.to_dict(), **meta}
-            model_ids.append(models["expression"].model_id)
-            for s in expr_scores:
-                expression_by_window[s.window_id] = s.suggestion(
-                    models["expression"].model_id, int(cfg.get("min_face_readings", 2))
-                )
-            stage_meta["expression"]["windows_with_suggestion"] = sum(
-                suggestion is not None for suggestion in expression_by_window.values()
+            expression_by_window, expression_meta, channel_outputs["expression"] = _score_expressions(
+                video_id, source, windows, models["expression"], profile.get("expression") or {}, want_gpu
             )
-            channel_outputs["expression"] = [s.to_dict() for s in expr_scores]
-            _release_gpu()
+            stage_meta.update(expression_meta)
+            model_ids.append(models["expression"].model_id)
 
         prov = provenance(profile, model_ids, list(stages))
         records: list[dict] = []
