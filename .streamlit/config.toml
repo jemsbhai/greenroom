@@ -1,0 +1,14 @@
+# Streamlit settings for the review and labeling apps.
+# Local-only: no Deploy button, no usage statistics sent to Streamlit, bound to the loopback address.
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "viewer"
+
+[server]
+address = "127.0.0.1"
+headless = true
+enableXsrfProtection = true
+maxUploadSize = 10
