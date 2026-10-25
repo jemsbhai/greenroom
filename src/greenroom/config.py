@@ -16,7 +16,7 @@ import yaml
 ENV_DATA_DIR = "GREENROOM_DATA_DIR"
 ENV_ALLOW_DATA_IN_REPO = "GREENROOM_ALLOW_DATA_IN_REPO"
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+VIDEO_EXTENSIONS = {".mp4", ".mpeg4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 
 
 def repo_root() -> Path:

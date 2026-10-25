@@ -58,6 +58,10 @@ The RTX 4090 profile enables local expression suggestions. They are stored separ
 
 Use `python -m greenroom tag-expressions --all` to refresh expressions for videos that already have pipeline records, or replace `--all` with `--video <id>`. This preserves activity predictions, speech, staff reviews and activity provenance. The refresh records its own model, configuration and time in each video's run metadata. Videos without records must first be processed with `python -m greenroom run --video <id>`.
 
+To add new recordings in the review app, open **Add videos** in the sidebar, choose one or more files, and select **Add to processing queue**. MP4 (including `.mpeg4`), MOV, MKV, AVI, WEBM and M4V are supported, up to 2 GB per file. **Upload progress** updates while you review other videos; completed uploads appear automatically in the Video selector. Failed uploads show an error and **Retry processing**. New installations can upload before a window index or review records exist, provided the external data directory and its `videos/` folder are present.
+
+Uploaded recordings stay in `<data>/videos/` and are analyzed locally with the RTX 4090 profile, including expressions. Silent videos use the vision and expression stages. The app validates each file and assigns a unique video ID without rebuilding existing windows or replacing recordings and staff reviews. Repeated uploads of the same file with the same profile reuse their existing job. Background jobs and logs live under `<data>/derived/uploads/`; processing continues when a browser tab is closed. Restart Streamlit after changing its upload limit in `.streamlit/config.toml`. The app requires the same model dependencies and local Ollama setup as the command-line pipeline.
+
 ## Repository layout
 
 ```

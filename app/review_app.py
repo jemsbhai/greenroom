@@ -19,7 +19,7 @@ import time
 import pandas as pd
 import streamlit as st
 
-from greenroom import config, ledger
+from greenroom import config, ledger, uploads
 from greenroom import taxonomy as T
 from greenroom.media import cut_subclip
 from greenroom.records import load_records
@@ -42,8 +42,85 @@ STATUS_TEXT = {
 
 
 @st.cache_data(show_spinner=False)
-def _index(path: str) -> dict:
+def _index(path: str, modified_ns: int) -> dict:
     return load_index(path)
+
+
+@st.fragment(run_every="3s")
+def _upload_panel(app_run: int) -> None:
+    """Upload controls and durable job status refresh without interrupting review."""
+    fragment_only = st.session_state.get("upload_panel_app_run") == app_run
+    st.session_state["upload_panel_app_run"] = app_run
+    with st.expander("Add videos", expanded=False):
+        st.caption("Choose videos to analyze and add to the review list. Uploads and processing stay on this computer.")
+        generation = st.session_state.get("upload_generation", 0)
+        selected = st.file_uploader(
+            "Choose videos",
+            type=sorted(ext.lstrip(".") for ext in config.VIDEO_EXTENSIONS),
+            accept_multiple_files=True,
+            key=f"video_uploads_{generation}",
+            help="Up to 2 GB per video. Existing videos and reviews are kept.",
+        )
+        if st.button("Add to processing queue", disabled=not selected, key="queue_uploads"):
+            notices = []
+            with st.spinner("Checking and saving videos…"):
+                for uploaded in selected:
+                    try:
+                        job = uploads.submit_upload(uploaded)
+                        notices.append(("success", f"{job['original_name']}: added to the processing queue."
+                                        if job["status"] == "queued" else f"{job['original_name']}: already {job['status']}."))
+                    except Exception as exc:  # noqa: BLE001
+                        notices.append(("error", f"{uploaded.name}: {exc}"))
+            st.session_state["upload_notices"] = notices
+            st.session_state["upload_generation"] = generation + 1
+            if fragment_only:
+                st.rerun()
+        for level, message in st.session_state.get("upload_notices", []):
+            (st.success if level == "success" else st.error)(message)
+
+    try:
+        jobs = uploads.list_jobs()
+        if any(job["status"] == "queued" for job in jobs):
+            uploads.start_worker()
+    except Exception as exc:  # noqa: BLE001
+        st.session_state["upload_queue_error"] = str(exc)
+        st.error(f"Could not start or read video processing: {exc}")
+        return
+    st.session_state["upload_jobs"] = jobs
+    st.session_state["upload_queue_error"] = None
+
+    completed = {job["job_id"] for job in jobs if job["status"] == "completed"}
+    previous = st.session_state.get("completed_upload_jobs", completed)
+    st.session_state["completed_upload_jobs"] = completed
+    if completed - previous and fragment_only:
+        # A full app run already reloads the index below. Interrupting it here would
+        # discard review widgets that have not rendered yet, including unsaved input.
+        st.rerun()
+    if jobs:
+        with st.expander("Upload progress", expanded=any(job["status"] in {"queued", "running", "failed"} for job in jobs)):
+            # Always retain unfinished jobs and their retry controls; cap only completed history.
+            visible_jobs = [job for job in jobs if job["status"] != "completed"]
+            visible_jobs += [job for job in jobs if job["status"] == "completed"][:10]
+            for job in visible_jobs:
+                st.text(job["original_name"])
+                status = job["status"]
+                if status == "completed":
+                    st.caption(f"Ready to review · {job['n_windows']} windows")
+                elif status == "running":
+                    st.caption("Processing locally… You can keep reviewing other videos.")
+                elif status == "queued":
+                    st.caption("Queued for processing")
+                else:
+                    st.error(job.get("error") or "Processing stopped before this video was ready.")
+                    if st.button("Retry processing", key=f"retry_upload_{job['job_id']}"):
+                        try:
+                            uploads.retry_job(job["job_id"])
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(str(exc))
+                        else:
+                            uploads.start_worker()
+                            if fragment_only:
+                                st.rerun()
 
 
 def _name(lid: str | None) -> str:
@@ -115,20 +192,32 @@ def _merged_export(records: list[dict], decided: dict) -> list[dict]:
 
 
 def main() -> None:
+    st.sidebar.title("greenroom staff review")
+    app_run = st.session_state.get("review_app_run", 0) + 1
+    st.session_state["review_app_run"] = app_run
+    with st.sidebar:
+        _upload_panel(app_run)
+    reviewer = st.sidebar.text_input("Reviewer name", value=st.session_state.get("reviewer", "")).strip()
+    st.session_state["reviewer"] = reviewer
+
     try:
-        index = _index(str(config.windows_index_path()))
+        index_path = config.windows_index_path()
+        if not index_path.is_file():
+            st.info("Use Add videos in the sidebar to upload your first video. It will appear here when processing finishes.")
+            st.stop()
+        index = _index(str(index_path), index_path.stat().st_mtime_ns)
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
         st.stop()
 
-    videos = [v for v in index["videos"] if (config.records_dir() / v["video_id"] / "records.jsonld").is_file()]
+    pending_uploads = {job["video_id"] for job in st.session_state.get("upload_jobs", []) if job["status"] != "completed"}
+    videos = [v for v in index["videos"] if v["video_id"] not in pending_uploads
+              and not (st.session_state.get("upload_queue_error") and v.get("upload_job_id"))
+              and (config.records_dir() / v["video_id"] / "records.jsonld").is_file()]
     if not videos:
-        st.info("No records yet. Run: python -m greenroom run --all")
+        st.info("No videos are ready to review yet. Add videos in the sidebar or check Upload progress.")
         st.stop()
 
-    st.sidebar.title("greenroom staff review")
-    reviewer = st.sidebar.text_input("Reviewer name", value=st.session_state.get("reviewer", "")).strip()
-    st.session_state["reviewer"] = reviewer
     if not reviewer:
         st.info("Enter your name in the sidebar. Every decision is recorded under that name.")
         st.stop()
@@ -137,7 +226,10 @@ def main() -> None:
         n = next(v["n_windows"] for v in videos if v["video_id"] == vid)
         return f"{vid}  ({len(ledger.latest_decisions(vid))}/{n} reviewed)"
 
-    video_id = st.sidebar.selectbox("Video", [v["video_id"] for v in videos], format_func=video_label)
+    video_ids = [v["video_id"] for v in videos]
+    if st.session_state.get("review_video_id") not in video_ids:
+        st.session_state["review_video_id"] = video_ids[0]
+    video_id = st.sidebar.selectbox("Video", video_ids, format_func=video_label, key="review_video_id")
     video = next(v for v in videos if v["video_id"] == video_id)
     records = load_records(config.records_dir() / video_id)
     windows = {w["window_id"]: w for w in windows_for_video(index, video_id)}

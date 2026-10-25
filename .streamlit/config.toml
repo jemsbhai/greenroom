@@ -11,4 +11,4 @@ toolbarMode = "viewer"
 address = "127.0.0.1"
 headless = true
 enableXsrfProtection = true
-maxUploadSize = 10
+maxUploadSize = 2048
