@@ -32,6 +32,16 @@ vision:
   detector: facebook/detr-resnet-50   # person counting, later phase
   detector_person_threshold: 0.7
 
+expression:
+  enabled: true
+  model: trpakov/vit-face-expression
+  fallback_model: dima806/facial_emotions_image_detection
+  sample_fps: 1.0
+  frame_height: 540
+  max_frames_per_window: 5
+  min_face_px: 40
+  min_face_readings: 2
+
 transcript_llm:
   backend: ollama
   model: qwen2.5:7b-instruct

@@ -234,6 +234,13 @@ def main() -> None:
                 f"facilitation: {'yes' if flag else 'no' if flag is False else 'unclear'} "
                 f"(confidence {speech.get('facilitation_confidence', 0.0):.2f}). {speech.get('rationale', '')}"
             )
+        suggestion = record.get("expression_suggestion")
+        if suggestion and st.toggle("Show unverified AI expression suggestion", value=False, key=f"expr_{record['window_id']}"):
+            st.warning(
+                f"{suggestion['label']} (share {suggestion.get('share', 0):.2f}, "
+                f"{suggestion.get('face_readings', 0)} face readings). Unverified model output, "
+                "not a statement about how anyone feels. Use the Edit form to record a staff observation."
+            )
         with st.expander("Evidence behind the suggestion"):
             st.caption("Fused opinions, top labels")
             st.dataframe(_label_table(record), use_container_width=True, hide_index=True)

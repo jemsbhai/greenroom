@@ -20,7 +20,7 @@ from .opinions import Opinion, from_score, relative_support, vacuous
 from .records import build_record, provenance, write_outputs
 from .windows import load_index, merge_runs, windows_for_video
 
-STAGES = ("audio", "vision", "transcript")
+STAGES = ("audio", "vision", "transcript", "expression")
 
 
 def base_rates(profile: dict) -> dict[str, float]:
@@ -159,6 +159,16 @@ def _load_models(profile: dict, stages: tuple[str, ...], want_gpu: bool, log) ->
                 temperature=float(llm.get("temperature", 0.0)),
             )
         log(f"transcript cues via {models['cues'].model_id}, local only ({m.wall_seconds:.1f} s)")
+    if "expression" in stages:
+        cfg = profile.get("expression") or {}
+        if cfg.get("enabled", False) and cfg.get("model"):
+            from .expressions import ExpressionTagger
+
+            with StageMeter("load_expression", gpu=want_gpu) as m:
+                models["expression"] = ExpressionTagger(
+                    cfg["model"], cfg.get("fallback_model"), device=device, min_face_px=int(cfg.get("min_face_px", 40))
+                )
+            log(f"expression {models['expression'].model_id}, in-memory only ({m.wall_seconds:.1f} s)")
     return models
 
 
@@ -298,6 +308,30 @@ def run_videos(
                 cue_by_window[c.window_id] = c.to_dict()
             channel_outputs["transcript"] = [c.to_dict() for c in cues]
 
+        expression_by_window: dict[str, dict | None] = {}
+        if "expression" in models:
+            cfg = profile.get("expression") or {}
+            fps = float(cfg.get("sample_fps", 1.0))
+            with StageMeter("sample_frames_expression", gpu=False) as m_hi:
+                hi_dir = config.frames_dir() / f"{video_id}_expr"
+                hi_paths = sample_frames(source, hi_dir, fps=fps, height=int(cfg.get("frame_height", 540)))
+            stage_meta["sample_frames_expression"] = {**m_hi.to_dict(), "n_frames": len(hi_paths), "sample_fps": fps}
+            with StageMeter("expression", gpu=want_gpu) as m_expr:
+                expr_scores, meta = models["expression"].score_windows(
+                    hi_dir, fps, windows, max_frames_per_window=int(cfg.get("max_frames_per_window", 5))
+                )
+            stage_meta["expression"] = {**m_expr.to_dict(), **meta}
+            model_ids.append(models["expression"].model_id)
+            for s in expr_scores:
+                expression_by_window[s.window_id] = s.suggestion(
+                    models["expression"].model_id, int(cfg.get("min_face_readings", 2))
+                )
+            stage_meta["expression"]["windows_with_suggestion"] = sum(
+                suggestion is not None for suggestion in expression_by_window.values()
+            )
+            channel_outputs["expression"] = [s.to_dict() for s in expr_scores]
+            _release_gpu()
+
         prov = provenance(profile, model_ids, list(stages))
         records: list[dict] = []
         with StageMeter("fusion_and_records", gpu=False) as m_fuse:
@@ -309,7 +343,11 @@ def run_videos(
                 facilitation = None
                 if cue.get("facilitation") is not None and cue.get("facilitation_confidence", 0.0) >= 0.5:
                     facilitation = bool(cue["facilitation"])
-                record = build_record(w, fused, conflicts, decision, mods, prov, facilitation_flag=facilitation)
+                record = build_record(
+                    w, fused, conflicts, decision, mods, prov,
+                    facilitation_flag=facilitation,
+                    expression_suggestion=expression_by_window.get(w["window_id"]),
+                )
                 if cue:
                     record["speech"] = {
                         "word_count": cue.get("word_count", 0),

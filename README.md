@@ -26,8 +26,10 @@ Design and decision log: [docs/PLAN.md](docs/PLAN.md). Label definitions: [docs/
 # one-time
 [Environment]::SetEnvironmentVariable("GREENROOM_DATA_DIR", "E:\path\to\data", "User")   # folder that contains videos\
 cd greenroom
+python -m venv --system-site-packages .venv  # reuse the installed CUDA torch build
+.\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"          # installs into the system Python; torch (CUDA build) is already there
+python -m pip install -e ".[dev]"
 
 # check the environment, build the window index, cut review subclips
 python -m greenroom env
@@ -37,7 +39,7 @@ python -m pytest -q
 # gold labeling app (human labels, no model output on screen)
 python -m streamlit run app/gold_app.py --server.address 127.0.0.1
 
-# pipeline (audio + two vision channels), records land under <data>/records/<video_id>/
+# pipeline (audio, vision, transcript, expression), records land under <data>/records/<video_id>/
 python -m pip install -e ".[ml]"
 python -m greenroom run --video this-is-me-songwriting-camp2-reese
 python -m greenroom run --all --profile rtx4090
@@ -47,7 +49,9 @@ python -m streamlit run app/review_app.py --server.address 127.0.0.1
 python -m greenroom verify
 ```
 
-The `ml` extra (`python -m pip install -e ".[ml]"`) installs the model dependencies for the pipeline stages; `torch` is expected to be installed already (CUDA build). No virtual environment is used on the development machine; pins are captured with `pip freeze > requirements.lock` once the pipeline runs.
+The `ml` extra (`python -m pip install -e ".[ml]"`) installs the model dependencies for the pipeline stages; `torch` is expected to be installed already (CUDA build). The project virtual environment reuses that installation. OpenCV is constrained to 4.x because the expression stage uses its bundled Haar `CascadeClassifier`; the base OpenCV 5 wheel no longer provides that API. If activation is unavailable, use `.\.venv\Scripts\python.exe` in place of `python`.
+
+The RTX 4090 profile enables local expression suggestions. They are stored separately from activity evidence, remain unverified, and are hidden in the review app until staff turn on **Show unverified AI expression suggestion**. Staff observations still require the Edit form.
 
 ## Repository layout
 
