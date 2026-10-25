@@ -21,6 +21,7 @@ import streamlit as st
 
 from greenroom import config, ledger, uploads
 from greenroom import taxonomy as T
+from greenroom.expression_timeline import build_expression_timeline, expression_timeline_csv
 from greenroom.media import cut_subclip
 from greenroom.records import load_records
 from greenroom.windows import load_index, windows_for_video
@@ -191,6 +192,96 @@ def _merged_export(records: list[dict], decided: dict) -> list[dict]:
     return merged
 
 
+def _expression_timeline(video_id: str, video: dict, records: list[dict], decided: dict, windows: dict) -> None:
+    document = build_expression_timeline(video_id, records, decided, video["source_file"])
+    entries = document["windows"]
+    st.subheader("Timestamped expression tags")
+    st.caption(
+        "Times refer to the original video. AI suggestions describe visible expressions, not how anyone feels. "
+        "Staff observations are recorded separately."
+    )
+    tagged = sum(entry["ai_expression"] is not None for entry in entries)
+    st.write(f"{tagged}/{len(entries)} windows have AI expression suggestions.")
+    selected_labels = st.multiselect(
+        "Filter expression tags",
+        ["Positive", "Neutral", "Negative", "Upset", "Confident", "No AI suggestion"],
+        key=f"timeline_labels_{video_id}",
+        help="Matches either an AI suggestion or a staff observation. Leave empty to show all windows.",
+    )
+    visible = [entry for entry in entries if not selected_labels or
+               (entry["ai_expression"] or {}).get("label", "No AI suggestion") in selected_labels or
+               (entry["staff_expression"] or {}).get("label") in selected_labels]
+    if visible:
+        rows = []
+        for entry in visible:
+            ai = entry["ai_expression"] or {}
+            staff = entry["staff_expression"] or {}
+            rows.append({
+                "Start": entry["start_time"], "End": entry["end_time"],
+                "AI expression (unverified)": ai.get("label", "No AI suggestion"),
+                "Share": ai.get("share"), "Face readings": ai.get("face_readings"),
+                "Staff observation": staff.get("label", "—"), "Review decision": entry["review_decision"],
+            })
+        st.dataframe(
+            pd.DataFrame(rows), use_container_width=True, hide_index=True, height=320,
+            column_config={"Share": st.column_config.NumberColumn(
+                format="%.2f", help="Aggregated model probability share; not a calibrated confidence or a person count."
+            )},
+        )
+        by_id = {entry["window_id"]: entry for entry in visible}
+        playback_key = f"timeline_window_{video_id}"
+        if st.session_state.get(playback_key) not in by_id:
+            st.session_state[playback_key] = visible[0]["window_id"]
+
+        def timestamp_label(window_id):
+            entry = by_id[window_id]
+            ai_label = (entry["ai_expression"] or {}).get("label", "No AI suggestion")
+            return f"{entry['start_time']} – {entry['end_time']} · {ai_label}"
+
+        selected_id = st.selectbox(
+            "Play timestamped window", list(by_id), format_func=timestamp_label, key=playback_key,
+        )
+        entry = by_id[selected_id]
+        st.caption(
+            f"Source interval: {entry['start_time']} – {entry['end_time']} "
+            f"({entry['start_s']:g}–{entry['end_s']:g} seconds). The clip player starts at 0 for this interval."
+        )
+        left, right = st.columns([3, 2])
+        with left:
+            try:
+                st.video(_subclip(windows[selected_id], video["source_file"], False))
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not play this interval: {exc}")
+        with right:
+            ai = entry["ai_expression"]
+            if ai:
+                st.warning(
+                    f"AI expression: {ai['label']} (unverified). "
+                    f"Share {ai.get('share', 0):.2f}; {ai.get('face_readings', 0)} face readings."
+                )
+                st.caption(f"Model: {ai.get('model_id', 'unknown')}")
+            else:
+                st.info("No AI suggestion for this interval. Missing evidence is not a Neutral tag.")
+            staff = entry["staff_expression"]
+            if staff:
+                st.write(f"Staff observation: **{staff['label']}**")
+                st.caption(f"Recorded by {staff.get('reviewer') or 'unknown'} at {staff.get('reviewed_at') or 'unknown'}.")
+            else:
+                st.caption("No staff expression observation recorded for this interval.")
+            st.caption("Use Review clips → Edit the labels to record a staff observation.")
+    else:
+        st.info("No timestamped windows match these expression tags. Clear the filter to see all windows.")
+    st.caption("Downloads include every window in this video, including intervals without an AI suggestion.")
+    st.download_button(
+        "Download expression timeline (JSON)", data=json.dumps(document, indent=2),
+        file_name=f"{video_id}_expressions.json", mime="application/json",
+    )
+    st.download_button(
+        "Download expression timeline (CSV)", data=expression_timeline_csv(document),
+        file_name=f"{video_id}_expressions.csv", mime="text/csv",
+    )
+
+
 def main() -> None:
     st.sidebar.title("greenroom staff review")
     app_run = st.session_state.get("review_app_run", 0) + 1
@@ -218,8 +309,9 @@ def main() -> None:
         st.info("No videos are ready to review yet. Add videos in the sidebar or check Upload progress.")
         st.stop()
 
-    if not reviewer:
-        st.info("Enter your name in the sidebar. Every decision is recorded under that name.")
+    view = st.sidebar.radio("View", ["Review clips", "Expression timeline"], key="review_view")
+    if not reviewer and view == "Review clips":
+        st.info("Enter your name in the sidebar to review clips, or choose Expression timeline to browse timestamped tags.")
         st.stop()
 
     def video_label(vid: str) -> str:
@@ -234,6 +326,10 @@ def main() -> None:
     records = load_records(config.records_dir() / video_id)
     windows = {w["window_id"]: w for w in windows_for_video(index, video_id)}
     decided = ledger.latest_decisions(video_id)
+
+    if view == "Expression timeline":
+        _expression_timeline(video_id, video, records, decided, windows)
+        return
 
     queue_name = st.sidebar.radio("Queue", list(QUEUES), index=list(QUEUES).index("Everything"))
     pending_only = st.sidebar.toggle("Pending only", value=True)

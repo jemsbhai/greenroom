@@ -13,6 +13,8 @@ A local, open-source pipeline cuts a long recording into 5-second windows, score
 
 Design and decision log: [docs/PLAN.md](docs/PLAN.md). Label definitions: [docs/ANNOTATION_GUIDELINE.md](docs/ANNOTATION_GUIDELINE.md).
 
+For teammates integrating this pipeline into another system, start with [INTEGRATION_HANDOFF.md](INTEGRATION_HANDOFF.md): portable setup, local job APIs, the timestamped expression contract, export commands, and staff-review safeguards.
+
 ## Data rules (read before running anything)
 
 - The provided videos contain youth participants. They never enter this repository, any public service, or any cloud model. All models run locally.
@@ -54,13 +56,15 @@ python -m greenroom verify
 
 The `ml` extra (`python -m pip install -e ".[ml]"`) installs the model dependencies for the pipeline stages; `torch` is expected to be installed already (CUDA build). The project virtual environment reuses that installation. OpenCV is constrained to 4.x because the expression stage uses its bundled Haar `CascadeClassifier`; the base OpenCV 5 wheel no longer provides that API. If activation is unavailable, use `.\.venv\Scripts\python.exe` in place of `python`.
 
-The RTX 4090 profile enables local expression suggestions. They are stored separately from activity evidence, remain unverified, and are hidden in the review app until staff turn on **Show unverified AI expression suggestion** in the sidebar. This control stays available even when a window has no suggestion, and stays on while browsing windows and videos. The sidebar reports how many windows have suggestions; a window without one shows an explanation. The default **Everything** queue includes all activity statuses. Staff observations still require the Edit form.
+The RTX 4090 profile enables local expression suggestions. They are stored separately from activity evidence, remain unverified, and in **Review clips** are hidden until staff turn on **Show unverified AI expression suggestion** in the sidebar. This control stays available even when a window has no suggestion, and stays on while browsing windows and videos. The sidebar reports how many windows have suggestions; a window without one shows an explanation. The default **Everything** queue includes all activity statuses. Staff observations still require the Edit form.
 
 Use `python -m greenroom tag-expressions --all` to refresh expressions for videos that already have pipeline records, or replace `--all` with `--video <id>`. This preserves activity predictions, speech, staff reviews and activity provenance. The refresh records its own model, configuration and time in each video's run metadata. Videos without records must first be processed with `python -m greenroom run --video <id>`.
 
 To add new recordings in the review app, open **Add videos** in the sidebar, choose one or more files, and select **Add to processing queue**. MP4 (including `.mpeg4`), MOV, MKV, AVI, WEBM and M4V are supported, up to 2 GB per file. **Upload progress** updates while you review other videos; completed uploads appear automatically in the Video selector. Failed uploads show an error and **Retry processing**. New installations can upload before a window index or review records exist, provided the external data directory and its `videos/` folder are present.
 
 Uploaded recordings stay in `<data>/videos/` and are analyzed locally with the RTX 4090 profile, including expressions. Silent videos use the vision and expression stages. The app validates each file and assigns a unique video ID without rebuilding existing windows or replacing recordings and staff reviews. Repeated uploads of the same file with the same profile reuse their existing job. Background jobs and logs live under `<data>/derived/uploads/`; processing continues when a browser tab is closed. Restart Streamlit after changing its upload limit in `.streamlit/config.toml`. The app requires the same model dependencies and local Ollama setup as the command-line pipeline.
+
+For timestamped expression tags across a video, choose **Expression timeline** under **View**. It shows source-relative start/end times, keeps unverified AI suggestions separate from staff observations, supports label filtering and window playback, and offers JSON/CSV downloads without requiring a reviewer name. For integration, use `python -m greenroom export-expressions --video <id> --output <external-path>/timeline.json` or `--all --output <external-directory>`; add `--format csv` for CSV. Windows without an expression remain in the export, and accepting an activity never promotes an AI expression to a staff observation.
 
 ## Repository layout
 
